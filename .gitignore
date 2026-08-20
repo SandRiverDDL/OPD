@@ -1,0 +1,29 @@
+# Experiment artifacts
+checkpoint/
+logs/
+outputs/
+justrl_eval_outputs/
+
+# Local datasets and generated dataset files
+datasets/
+
+# Evaluation outputs generated under scripts/
+scripts/val/eval/justrl_eval_outputs/
+scripts/val/eval/logs/
+
+# Python caches and compiled files
+__pycache__/
+*.py[cod]
+
+# Local runtime files
+.pid
+
+# Large model/checkpoint archives
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.tar
+*.tar.gz
+*.zip

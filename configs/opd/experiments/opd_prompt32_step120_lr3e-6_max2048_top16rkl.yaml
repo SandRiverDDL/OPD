@@ -1,0 +1,26 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_prompt32_step120_lr3e-6_max2048_top16rkl
+  objective: top16rkl
+  description: >
+    OPD truncation experiment based on the bz32/lr3e-6 configuration.
+    The prompt and response lengths are each capped at 1024, so the
+    prompt-plus-response maximum is 2048 tokens. Uses top-16 reverse-KL
+    distillation with the previous JustRL-DeepSeek-1.5B teacher.
+
+length:
+  max_prompt: 1024
+  max_response: 1024
+  max_val_response: 1024
+
+rollout:
+  log_prob_top_k: 16
+  top_k_strategy: only_stu
+  reward_weight_mode: student_p
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 120
+  learning_rate: 3.0e-6

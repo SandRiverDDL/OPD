@@ -1,62 +1,49 @@
 import os
 import json
-import random
 import re
 import argparse
 import concurrent.futures
 import multiprocessing  # Added for spawn-based worker management
 import gc  # Added for explicit resource cleanup
-import torch  # Added for CUDA cache cleanup
 from pathlib import Path
 
 import pandas as pd
 from tqdm import tqdm
-from vllm import LLM, SamplingParams
-# Try to import distributed cleanup helpers for releasing GPU memory.
-try:
-    from vllm.distributed.parallel_state import destroy_model_parallel
-except ImportError:
-    destroy_model_parallel = None
-try:
-    from vllm.distributed.parallel_state import destroy_distributed_environment
-except ImportError:
-    destroy_distributed_environment = None
 
 # --------------------------------------------------------------------------- #
 #                   Global constants / variables                              #
 # --------------------------------------------------------------------------- #
 DATA_DIR = "../data"
-# MODEL_FOLDER = "../../model/Qwen3-1.7B-SFT-DAPO-4B-filtered"
+# Override these from the shell for a checkpoint without editing this file.
+MODEL_NAMES = [os.environ.get("EVAL_MODEL_PATH", "../../model/Qwen3-4B")]
+MODEL_DISPLAY_NAMES = {
+    MODEL_NAMES[0]: os.environ.get("EVAL_MODEL_NAME", Path(MODEL_NAMES[0]).name)
+}
 
-def extract_max_number(path):
-    """Extract all numbers from a path and return the largest one for sorting."""
-    numbers = re.findall(r'\d+', path)
-    if numbers:
-        return max(int(n) for n in numbers)
-    return -1  # If there is no number, keep this entry at the end.
-
-# Collect model paths and sort them by descending numeric suffix.
-try:
-    model_files = os.listdir(MODEL_FOLDER)
-    MODEL_NAMES_CANDIDATES = [os.path.join(MODEL_FOLDER, f) for f in model_files]
-    MODEL_NAMES_CANDIDATES.sort(key=extract_max_number, reverse=True)
-except FileNotFoundError:
-    MODEL_NAMES_CANDIDATES = []
-
-# Active model list.
-MODEL_NAMES = MODEL_NAMES_CANDIDATES
-MODEL_NAMES = ["../../model/Qwen3-4B"]
-
+EVAL_TASK = os.environ.get("EVAL_TASK", "MATH-500")
+EVAL_TASK_N = int(os.environ.get("EVAL_N", "1"))
 TASKS = [
-    {"name": "AIME24", "path": f"{DATA_DIR}/AIME24/test.parquet", "N": 16},
-    {"name": "AIME25", "path": f"{DATA_DIR}/AIME25/test.parquet", "N": 16},
-    {"name": "AMC23", "path": f"{DATA_DIR}/AMC23/test.parquet", "N": 16},
+    {
+        "name": EVAL_TASK,
+        "path": f"{DATA_DIR}/{EVAL_TASK}/test.parquet",
+        "N": EVAL_TASK_N,
+    },
 ]
 
 PROMPT_TEMPLATE = """{problem} Please reason step by step, and put your final answer within \\boxed{{}}."""
-MAX_TOKENS  = 31744
+MAX_TOKENS  = int(os.environ.get("EVAL_MAX_TOKENS", "31744"))
 TEMPERATURE = 0.7
 TOP_P       = 0.95
+EVAL_SEED = os.environ.get("EVAL_SEED")
+EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "32"))
+EVAL_MAX_NUM_SEQS = int(
+    os.environ.get("EVAL_MAX_NUM_SEQS", str(EVAL_BATCH_SIZE * EVAL_TASK_N))
+)
+AVAILABLE_GPUS = [
+    int(value)
+    for value in os.environ.get("EVAL_GPUS", "0,1,2,3,4,5,6,7").split(",")
+    if value.strip()
+]
 REPLACE     = False
 
 # --------------------------------------------------------------------------- #
@@ -87,12 +74,17 @@ def load_samples(filepath: str):
     return samples
 
 
-def split_rollout_ids(rollout_ids: list[int], num_workers: int):
-    """Round-robin split of rollout IDs into num_workers chunks."""
-    chunks = [[] for _ in range(num_workers)]
-    for idx, rollout_id in enumerate(rollout_ids):
-        chunks[idx % num_workers].append(rollout_id)
-    return chunks
+def split_samples(samples: list[dict], num_workers: int) -> list[list[dict]]:
+    """Split samples into contiguous, near-equal data-parallel shards."""
+    num_workers = min(num_workers, len(samples)) if samples else num_workers
+    floor, remainder = divmod(len(samples), num_workers)
+    shards = []
+    start = 0
+    for rank in range(num_workers):
+        size = floor + (rank < remainder)
+        shards.append(samples[start : start + size])
+        start += size
+    return shards
 
 
 # --------------------------------------------------------------------------- #
@@ -101,13 +93,24 @@ def split_rollout_ids(rollout_ids: list[int], num_workers: int):
 def worker_process(args_tuple):
     """
     Each worker runs on a single GPU:
-    args_tuple = (model_name, samples, rollout_id_list, gpu_id, enable_thinking)
+    args_tuple = (model_name, samples, gpu_id, enable_thinking, eval_batch_size, num_samples)
     gpu_id: values such as "0" or "3", used for CUDA_VISIBLE_DEVICES
     """
-    model_name, samples, rollout_id_list, gpu_id, enable_thinking = args_tuple
+    model_name, samples, gpu_id, enable_thinking, eval_batch_size, num_samples = args_tuple
     
     # CUDA_VISIBLE_DEVICES must be set inside the spawned process.
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+    # Import CUDA/vLLM only after constraining visibility to this worker.
+    import torch
+    from vllm import LLM, SamplingParams
+    try:
+        from vllm.distributed.parallel_state import destroy_model_parallel
+    except ImportError:
+        destroy_model_parallel = None
+    try:
+        from vllm.distributed.parallel_state import destroy_distributed_environment
+    except ImportError:
+        destroy_distributed_environment = None
     
     results = []
     llm = None
@@ -115,8 +118,9 @@ def worker_process(args_tuple):
     
     try:
         print(
-            f"[GPU {gpu_id}] | Model: {model_name} | rollouts len={len(rollout_id_list)} "
-            f"| loading model (TP=1, enable_thinking={enable_thinking})...",
+            f"[GPU {gpu_id}] | Model: {model_name} | samples={len(samples)} "
+            f"| loading model (TP=1, batch_size={eval_batch_size}, "
+            f"enable_thinking={enable_thinking})...",
             flush=True,
         )
         
@@ -126,6 +130,10 @@ def worker_process(args_tuple):
             trust_remote_code=True,
             gpu_memory_utilization=0.9,
             tensor_parallel_size=1,
+            max_model_len=int(
+                os.environ.get("EVAL_MAX_MODEL_LEN", str(MAX_TOKENS + 2048))
+            ),
+            max_num_seqs=EVAL_MAX_NUM_SEQS,
         )
         
         # Get the tokenizer.
@@ -145,19 +153,20 @@ def worker_process(args_tuple):
             tokenizer = None
             print(f"[GPU {gpu_id}] Warning: Could not get tokenizer for stop tokens: {e}", flush=True)
         
-        for rollout_id in rollout_id_list:
-            sampling = SamplingParams(
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                max_tokens=MAX_TOKENS,
-                stop_token_ids=stop_token_ids if stop_token_ids else None,
-            )
+        sampling = SamplingParams(
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            max_tokens=MAX_TOKENS,
+            n=num_samples,
+            seed=int(EVAL_SEED) if EVAL_SEED is not None else None,
+            stop_token_ids=stop_token_ids if stop_token_ids else None,
+        )
 
-            if tokenizer is None:
-                raise RuntimeError("Tokenizer is required for apply_chat_template, but it could not be loaded.")
+        if tokenizer is None:
+            raise RuntimeError("Tokenizer is required for apply_chat_template, but it could not be loaded.")
 
-            # Do not set request-level seeds here. Per-request generators can
-            # force vLLM to fall back from the FlashInfer sampler path.
+        for batch_start in range(0, len(samples), eval_batch_size):
+            batch = samples[batch_start : batch_start + eval_batch_size]
             formatted_prompts = [
                 tokenizer.apply_chat_template(
                     [{"role": "user", "content": s["prompt"]}],
@@ -165,22 +174,20 @@ def worker_process(args_tuple):
                     add_generation_prompt=True,
                     enable_thinking=enable_thinking,
                 )
-                for s in samples
+                for s in batch
             ]
-            
-            # Disable per-worker tqdm output to keep multi-process logs readable.
             outputs = llm.generate(formatted_prompts, sampling, use_tqdm=False)
-            
-            for sample, out in zip(samples, outputs):
-                results.append(
-                    {
-                        "example_id": sample["example_id"],
-                        "prompt": sample["prompt"],
-                        "answer": sample["answer"],
-                        "seed": rollout_id,
-                        "response": out.outputs[0].text,
-                    }
-                )
+            for sample, out in zip(batch, outputs):
+                for sample_output in out.outputs[:num_samples]:
+                    results.append(
+                        {
+                            "example_id": sample["example_id"],
+                            "prompt": sample["prompt"],
+                            "answer": sample["answer"],
+                            "seed": len(results),
+                            "response": sample_output.text,
+                        }
+                    )
     
     except Exception as e:
         print(f"[GPU {gpu_id}] Critical Error: {e}", flush=True)
@@ -233,18 +240,23 @@ def main():
     parser.set_defaults(enable_thinking=False)
     args = parser.parse_args()
 
-    # Specify GPU IDs, with one model instance assigned to each GPU.
-    available_gpus = [0, 1, 2, 3, 4, 5, 6, 7]
+    # One independent TP=1 vLLM replica per GPU.
+    available_gpus = AVAILABLE_GPUS
     gpu_workers = [str(gpu_id) for gpu_id in available_gpus]
     num_workers = len(gpu_workers)
 
     print(f"GPU workers (one model per GPU): {gpu_workers}")
     print(f"apply_chat_template enable_thinking={args.enable_thinking}")
+    print(
+        f"prompt_batch_size={EVAL_BATCH_SIZE}, "
+        f"max_num_seqs={EVAL_MAX_NUM_SEQS}"
+    )
 
     for model_name in MODEL_NAMES:
         print(f"\n{'='*50}\nStarting evaluation for model: {model_name}\n{'='*50}")
         
-        OUT_DIR = Path(f"justrl_eval_outputs/{model_name.split('/')[-1]}")
+        out_name = MODEL_DISPLAY_NAMES.get(model_name, Path(model_name).name)
+        OUT_DIR = Path(f"justrl_eval_outputs/{out_name}")
         OUT_DIR.mkdir(parents=True, exist_ok=True)
 
         for task in TASKS:
@@ -273,16 +285,21 @@ def main():
                 print("Example prompt after formatting:")
                 print(samples[0]["prompt"])
             
-            # 2. Generate rollout IDs and split across GPUs.
-            # These IDs are bookkeeping only; they no longer control vLLM RNG.
-            rollout_ids = list(range(N))
-            rollout_chunks = split_rollout_ids(rollout_ids, num_workers)
+            # 2. Shard prompts across independent vLLM replicas.
+            sample_shards = split_samples(samples, num_workers)
 
             # 3. Launch workers, with each worker using one GPU.
             all_results = []
             args_list = [
-                (model_name, samples, rollout_chunks[i], gpu_workers[i], args.enable_thinking)
-                for i in range(num_workers)
+                (
+                    model_name,
+                    sample_shards[i],
+                    gpu_workers[i],
+                    args.enable_thinking,
+                    EVAL_BATCH_SIZE,
+                    N,
+                )
+                for i in range(len(sample_shards))
             ]
             
             # Use the spawn start method for worker processes.

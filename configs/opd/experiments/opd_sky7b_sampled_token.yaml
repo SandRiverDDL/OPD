@@ -1,0 +1,21 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_sky7b_sampled_token
+  description: >
+    Sampled-token OPD with Skywork-OR1-Math-7B teacher.
+
+environment:
+  hf_teacher_repo: Skywork/Skywork-OR1-Math-7B
+
+model:
+  teacher_name: Skywork-OR1-Math-7B
+
+rollout:
+  log_prob_top_k: 0
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 120
+  learning_rate: 3.0e-6

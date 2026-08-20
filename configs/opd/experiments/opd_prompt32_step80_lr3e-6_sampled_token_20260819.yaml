@@ -1,0 +1,16 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_prompt32_step80_lr3e-6_sampled_token_20260819
+  description: >
+    Sampled-token OPD configuration with prompt batch size 32, four responses
+    per prompt, 80 optimizer steps, and learning rate 3e-6.
+
+rollout:
+  log_prob_top_k: 0
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 80
+  learning_rate: 3.0e-6

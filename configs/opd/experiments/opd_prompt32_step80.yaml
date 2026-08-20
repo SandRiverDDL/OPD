@@ -1,0 +1,12 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_prompt32_step80_20260818_181805
+  description: >
+    Strict OPD configuration with prompt batch size 32, four responses per
+    prompt, and 80 optimizer steps.
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 80

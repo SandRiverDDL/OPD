@@ -1,5 +1,6 @@
 from utils import grade_answer_verl
 from transformers import AutoTokenizer
+import os
 import json
 import pandas as pd
 from pathlib import Path
@@ -33,16 +34,30 @@ Here is your task. Simply reply with either CORRECT, INCORRECT, or INVALID. Don'
 Judging the correctness of the candidate's answer:
 """
 
-NAME     = "Qwen3-4B-Non-Thinking-RL-Math" 
+NAME     = os.environ.get("EVAL_NAME", "Qwen3-4B-Non-Thinking-RL-Math")
 EVAL_DIR = Path(f"justrl_eval_outputs/{NAME}")
 OUTPUT_FILE = EVAL_DIR / "grading_results.json"
-MODEL_NAME = "../../model/CompassVerifier-3B"
+MODEL_NAME = os.environ.get("VERIFIER_MODEL_PATH", "../../model/CompassVerifier-3B")
 
 # Global variables to be initialized if needed
 vllm_model = None
 model_tokenizer = None
 sampling_params = None
-length_tokenizer = AutoTokenizer.from_pretrained("../../model/Qwen3-1.7B", local_files_only=True)
+length_tokenizer = None
+length_tokenizer_path = os.environ.get(
+    "EVAL_LENGTH_TOKENIZER",
+    os.environ.get("EVAL_MODEL_PATH", "../../model/Qwen3-1.7B"),
+)
+try:
+    length_tokenizer = AutoTokenizer.from_pretrained(
+        length_tokenizer_path,
+        local_files_only=True,
+    )
+except Exception as exc:
+    print(
+        f"Warning: length tokenizer unavailable at {length_tokenizer_path!r}; "
+        f"falling back to character lengths: {exc}"
+    )
 
 def get_len(seq):
     if length_tokenizer:
