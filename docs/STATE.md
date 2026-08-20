@@ -79,6 +79,30 @@
   `max_tokens=7168` 的 `0.744` 不属于等长比较。
 - 当前没有残留训练、评测或 Ray 任务。
 
+## 最近实验与文档状态
+
+- `docs/experiments/` 已补齐近期五个实验报告：
+  - `opd_prompt32_step80_20260818_181805`：prompt32、`lr=1e-6`、top-16；
+  - `opd_prompt32_step80_lr3e-6_20260819`：prompt32、`lr=3e-6`、top-16；
+  - `opd_prompt32_step80_lr3e-6_sampled_token_20260819`：sampled-token；
+  - `opd_sky7b_sampled_token`：Skywork-OR1-Math-7B teacher；
+  - `opd_prompt32_step120_lr3e-6_max2048_top16rkl`：训练最大
+    prompt+response 长度为 2048 tokens。
+- 近期 run 的 AIME25 摘要和比较边界已同步到
+  `docs/OPD_BENCHMARK_SUMMARY.md`；实验索引位于
+  `docs/experiments/README.md`。
+- 近期新增 run 均已保存 checkpoint 并完成训练阶段；其中：
+  - prompt32 `lr=1e-6` 当前只核对到 step80 的 AIME25 结果；
+  - prompt32 `lr=3e-6` 的最高 `avg@16` 为 step60 的 33.33%；
+  - sampled-token JustRL run 的最高 `avg@16` 为 step80 的 31.88%；
+  - Skywork sampled-token run 的最高 `avg@16` 为 step120 的 29.58%；
+  - max-2048 top-16 run 的最高 `avg@16` 为 step60 的 32.29%。
+- 这些结果使用统一 AIME25 长输出评测口径，但不是严格单变量消融；
+  特别要区分 sampled-token、teacher 替换和训练 response=1024 的
+  max-2048 实验，不能与 canonical strict reproduction 曲线直接拼接。
+- checkpoint、日志和评测 JSONL 仍保留在本地运行目录，不纳入 Git；
+  Git 中只维护实验报告、索引和稳定状态说明。
+
 ## 已确认的本地环境状态
 
 截至 2026-08-14，当前 `torch-base` 环境已确认：

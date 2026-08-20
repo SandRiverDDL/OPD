@@ -1,6 +1,6 @@
 # OPD Benchmark Summary
 
-> 更新时间：2026-08-18  
+> 补充至：2026-08-20
 > 本文只汇总仓库中**已经实际生成并核对过**的评测结果，不把未运行的
 > benchmark 或未验证的推测写成结果。
 
@@ -254,6 +254,98 @@ opd_dedup_math500_20260814_202302_dedup
 同一 checkpoint 的这两个结果再次说明：MATH-500 的生成长度配置会
 显著影响分数，必须在表格中显式区分。
 
+### 4.4 近期 prompt32 / sampled-token / max-2048 实验：AIME25
+
+以下 run 使用与前文相同的 AIME25 长输出评测口径：
+
+```text
+30 题，N=16，temperature=0.7，top_p=0.95，
+max_tokens=31744，max_model_len=33792，enable_thinking=True，
+rule-based grading
+```
+
+#### `opd_prompt32_step80_20260818_181805`
+
+该 run 使用 prompt batch size 32、`N_RESPONSES=4`、`lr=1e-6`、
+`LOG_PROB_TOP_K=16`，训练到 step80。step60 的评测目录已创建但没有
+`grading_results.json`，因此这里只记录已核对的 step80：
+
+| Checkpoint | avg@16 | best@16 | solve_all | solve_none | format errors | 平均输出长度 |
+|---:|---:|---:|---:|---:|---:|---:|
+| step80 | 30.83% | 53.33% | 2/30 | 14/30 | 16/480 | 8337.07 |
+
+#### `opd_prompt32_step80_lr3e-6_20260819`
+
+该 run 与上一轮保持 prompt32、top-16 和 `N_RESPONSES=4`，将 learning
+rate 改为 `3e-6`：
+
+| Checkpoint | avg@16 | best@16 | solve_all | solve_none | format errors | 平均输出长度 |
+|---:|---:|---:|---:|---:|---:|---:|
+| step20 | 26.67% | 50.00% | 2/30 | 15/30 | 25/480 | 10037.28 |
+| step40 | 31.67% | 50.00% | 2/30 | 15/30 | 28/480 | 7946.27 |
+| step60 | **33.33%** | 50.00% | 3/30 | 15/30 | 28/480 | 7888.09 |
+| step80 | 31.88% | 46.67% | 3/30 | 16/30 | 37/480 | 7924.95 |
+
+#### `opd_prompt32_step80_lr3e-6_sampled_token_20260819`
+
+该 run 将 `LOG_PROB_TOP_K` 设为 0，使用 sampled-token
+distillation，而不是 top-16 reward：
+
+| Checkpoint | avg@16 | best@16 | solve_all | solve_none | format errors | 平均输出长度 |
+|---:|---:|---:|---:|---:|---:|---:|
+| step20 | 27.71% | 50.00% | 4/30 | 15/30 | 28/480 | 10578.07 |
+| step40 | 31.04% | 53.33% | 3/30 | 14/30 | 21/480 | 8140.96 |
+| step60 | 29.79% | 43.33% | 1/30 | 17/30 | 32/480 | 8192.84 |
+| step80 | **31.88%** | 56.67% | 3/30 | 13/30 | 51/480 | 8227.88 |
+
+#### `opd_sky7b_sampled_token`
+
+该 run 使用 `Skywork/Skywork-OR1-Math-7B` teacher 和 sampled-token
+distillation：
+
+| Checkpoint | avg@16 | best@16 | solve_all | solve_none | format errors | 平均输出长度 |
+|---:|---:|---:|---:|---:|---:|---:|
+| step20 | 25.63% | 40.00% | 3/30 | 18/30 | 128/480 | 19060.10 |
+| step40 | 27.50% | 50.00% | 2/30 | 15/30 | 80/480 | 16361.91 |
+| step60 | 28.33% | 53.33% | 2/30 | 14/30 | 66/480 | 15814.22 |
+| step80 | 28.33% | 46.67% | 2/30 | 16/30 | 66/480 | 15582.58 |
+| step100 | 29.17% | 46.67% | 4/30 | 16/30 | 51/480 | 15498.44 |
+| step120 | **29.58%** | 43.33% | 3/30 | 17/30 | 44/480 | 14431.22 |
+
+#### `opd_prompt32_step120_lr3e-6_max2048_top16rkl`
+
+该 run 使用 top-16 reward，但训练时 `max_prompt=1024`、
+`max_response=1024`，所以 prompt+response 最大长度为 2048 tokens。
+独立 AIME25 评测仍使用长输出配置：
+
+| Checkpoint | avg@16 | best@16 | solve_all | solve_none | format errors | 平均输出长度 |
+|---:|---:|---:|---:|---:|---:|---:|
+| step20 | 26.46% | 53.33% | 3/30 | 14/30 | 55/480 | 12003.19 |
+| step40 | 30.63% | 46.67% | 5/30 | 16/30 | 39/480 | 10696.89 |
+| step60 | **32.29%** | 50.00% | 3/30 | 15/30 | 40/480 | 11995.43 |
+| step80 | 28.33% | 60.00% | 2/30 | 12/30 | 55/480 | 13420.39 |
+| step100 | 30.21% | 53.33% | 1/30 | 14/30 | 60/480 | 13221.23 |
+| step120 | 29.58% | 60.00% | 2/30 | 12/30 | 55/480 | 12819.44 |
+
+这些 run 的完整配置、训练诊断和 artifact 路径分别记录在
+[`docs/experiments/`](experiments/README.md) 的独立报告中。
+
+### 4.5 近期结果的比较边界
+
+上述五个 run 的 AIME25 生成和评分口径一致，但不能视为严格单变量
+消融：prompt batch size、learning rate、distillation reward、teacher、
+训练长度和 response budget 分别发生了变化。特别是：
+
+- sampled-token run 没有 top-k overlap 指标；
+- Skywork run 改变了 teacher；
+- max-2048 run 的训练 response 全部达到 1024 token 上限；
+- AIME25 每个 checkpoint 只有 30 道题、16 次采样，局部峰值可能有较大
+  采样波动。
+
+因此当前最稳妥的用途是：把 strict reproduction 作为 canonical baseline，
+把这些 run 作为后续消融和配置选择的候选轨迹，而不是直接宣称某个字段
+带来了表格中的全部差异。
+
 ## 5. 当前结论
 
 1. **Base student 与 teacher 存在明显能力差距。**  
@@ -273,6 +365,10 @@ opd_dedup_math500_20260814_202302_dedup
    时必须固定 `enable_thinking`、`max_tokens`、`temperature`、`top_p`、
    `N` 和 grading 方式。
 
-5. **目前没有发现已完成的 AMC25/AMC23 结果文件。**  
-   当前可直接纳入本总结的 benchmark 主要是 AIME25 和 MATH-500。
+5. **近期新增 run 已补充到独立实验报告。**
+   当前新增报告覆盖 prompt32 的 `lr=1e-6`、`lr=3e-6`、sampled-token、
+   Skywork teacher，以及 max-2048 top-16 配置；它们的可比性边界已在
+   本节和各自报告中注明。
 
+6. **目前没有发现已完成的 AMC25/AMC23 结果文件。**
+   当前可直接纳入本总结的 benchmark 主要是 AIME25 和 MATH-500。

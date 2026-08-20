@@ -72,6 +72,11 @@ rule-based grading
 | Teacher | reference | — | teacher 模型 | — | **36.04%** | [Benchmark summary](../OPD_BENCHMARK_SUMMARY.md) |
 | `opd_100steps_20260817_173758` | diagnostic | Base student | `N=1`、bf16 参数/state、持久化短数据集 | 100 / 100 | 24.38% | [Run report](opd_100steps_20260817_173758.md) |
 | `opd_strict_repro_20260818_013200` | baseline | Base student | `N=4`、fp32 参数/state、原始 DAPO 配置 | 279 / 220 evaluated | **35.83%** | [Run report](opd_strict_repro_20260818_013200.md) |
+| `opd_prompt32_step80_20260818_181805` | completed | Strict reproduction | prompt batch/mini-batch=32，80 step，`lr=1e-6` | 80 / 80 | 30.83% | [Run report](opd_prompt32_step80_20260818_181805.md) |
+| `opd_prompt32_step80_lr3e-6_20260819` | completed | Prompt32 step80 | `lr=3e-6`，top-16 | 80 / 80 | **33.33%** | [Run report](opd_prompt32_step80_lr3e-6_20260819.md) |
+| `opd_prompt32_step80_lr3e-6_sampled_token_20260819` | completed | Prompt32 lr3e-6 | `LOG_PROB_TOP_K=0`，sampled-token | 80 / 80 | 31.88% | [Run report](opd_prompt32_step80_lr3e-6_sampled_token_20260819.md) |
+| `opd_sky7b_sampled_token` | completed | Prompt32 sampled-token | teacher→`Skywork-OR1-Math-7B` | 120 / 120 | 29.58% | [Run report](opd_sky7b_sampled_token.md) |
+| `opd_prompt32_step120_lr3e-6_max2048_top16rkl` | completed | Prompt32 lr3e-6 | `max_prompt=1024`、`max_response=1024`，总上限 2048 | 120 / 120 | 32.29% | [Run report](opd_prompt32_step120_lr3e-6_max2048_top16rkl.md) |
 
 ## 3. Comparability notes
 
@@ -123,6 +128,27 @@ N_RESPONSES=4 → 1
 特别是 MATH-500：历史结果已经显示，`max_tokens=7168` 与
 `max_tokens=31744` 会产生很大差异，不能混成一条曲线。
 
+### 3.3 近期实验的比较边界
+
+近期新增的五个 run 都使用统一的 AIME25 长输出评测口径，但训练配置
+并非单变量变化：
+
+- `opd_prompt32_step80_20260818_181805` 与 canonical baseline 的
+  prompt batch size、mini-batch size 和训练时长不同；
+- `opd_prompt32_step80_lr3e-6_20260819` 主要相对前一轮改变 learning rate，
+  但仍是 prompt32 的短程实验；
+- `opd_prompt32_step80_lr3e-6_sampled_token_20260819` 把 top-16 reward
+  改成 sampled-token reward，不能与 top-16 的 overlap 直接比较；
+- `opd_sky7b_sampled_token` 同时替换了 teacher，且继续使用
+  sampled-token reward；
+- `opd_prompt32_step120_lr3e-6_max2048_top16rkl` 将训练 response
+  硬截断到 1024 tokens；其独立 AIME25 评测仍使用 `max_tokens=31744`，
+  不应把评测输出长度与训练长度混为一谈。
+
+因此，这些报告适合用于记录实验轨迹和选择后续方向，不应直接拼成一条
+严格的因果曲线。跨 run 的数值账本见
+[`docs/OPD_BENCHMARK_SUMMARY.md`](../OPD_BENCHMARK_SUMMARY.md)。
+
 ## 4. 新增实验的最小流程
 
 以后每一轮实验只需：
@@ -142,4 +168,3 @@ N_RESPONSES=4 → 1
 - `diagnostic`：用于排查问题，不是严格对照；
 - `interrupted`：训练中断，但已有产物可分析；
 - `invalid`：配置或运行错误，不应作为实验结论。
-
