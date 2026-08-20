@@ -744,6 +744,15 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        if loss_mode == "eopd":
+            select_keys.extend(
+                [
+                    "teacher_entropy",
+                    "teacher_top_k_ids",
+                    "teacher_top_k_log_probs",
+                ]
+            )
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -823,9 +832,26 @@ class DataParallelPPOActor(BasePPOActor):
                     if entropy_coeff != 0:
                         calculate_entropy = True
                     
+                    # EOPD uses sampled-token advantages plus an auxiliary
+                    # forward-KL term over the teacher's top-k token ids.
+                    eopd_teacher_topk_log_probs = None
+                    eopd_student_topk_log_probs = None
+                    if loss_mode == "eopd":
+                        teacher_top_k_ids = model_inputs["teacher_top_k_ids"]
+                        eopd_teacher_topk_log_probs = model_inputs["teacher_top_k_log_probs"]
+                        teacher_top_k = teacher_top_k_ids.shape[-1]
+                        entropy, log_prob, _, eopd_student_topk_log_probs = self._forward_micro_batch(
+                            model_inputs,
+                            temperature=temperature,
+                            calculate_entropy=calculate_entropy,
+                            top_k=teacher_top_k,
+                            student_top_k_ids=teacher_top_k_ids,
+                        )
+                        log_prob_for_loss = log_prob
+
                     # Check if we have 3D advantages (top-k sampling case)
                     # If so, we need to recompute top-k log probs for correct gradient
-                    if advantages.dim() == 3:
+                    elif advantages.dim() == 3:
                         top_k = advantages.shape[-1]
                         # For union strategy, use union_top_k_ids; otherwise use student_top_k_ids
                         student_top_k_ids = None
@@ -874,7 +900,6 @@ class DataParallelPPOActor(BasePPOActor):
                             else:
                                 old_log_prob = model_inputs["old_log_probs"]
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
 
                     # Extract pre-computed rollout correction weights if present
@@ -891,7 +916,7 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
                     # Compute policy loss (any function is expected to return 2 values)
-                    pg_loss, pg_metrics = policy_loss_fn(
+                    policy_loss_kwargs = dict(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob_for_loss,  # 3D for top-k, 2D otherwise
                         advantages=advantages,
@@ -901,6 +926,15 @@ class DataParallelPPOActor(BasePPOActor):
                         rollout_is_weights=rollout_is_weights,
                         format_mask=format_mask,
                     )
+                    if loss_mode == "eopd":
+                        policy_loss_kwargs.update(
+                            {
+                                "teacher_entropy": model_inputs["teacher_entropy"],
+                                "teacher_topk_log_probs": eopd_teacher_topk_log_probs,
+                                "student_topk_log_probs": eopd_student_topk_log_probs,
+                            }
+                        )
+                    pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
                     micro_batch_metrics.update(pg_metrics)
 
                     if entropy_coeff != 0:

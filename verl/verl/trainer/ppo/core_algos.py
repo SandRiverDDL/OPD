@@ -1197,6 +1197,135 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("eopd")
+def compute_policy_loss_eopd(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+    format_mask: torch.Tensor | None = None,
+    teacher_entropy: torch.Tensor | None = None,
+    teacher_topk_log_probs: torch.Tensor | None = None,
+    student_topk_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute entropy-aware sampled-token on-policy distillation loss.
+
+    The reverse-KL part is the existing sampled-token OPD PPO surrogate:
+
+    ``A_t = log p_teacher(x_t) - log p_old_student(x_t)``.
+
+    EOPD adds a top-k approximation of the teacher-to-student forward KL on
+    response positions where the teacher entropy is above a threshold.  The
+    teacher top-k probabilities are renormalized over the top-k set, while
+    student top-k log probabilities remain full-vocabulary log probabilities.
+    This matches the paper's efficient approximation and keeps the sampled
+    token reverse-KL signal unchanged.
+
+    Args:
+        old_log_prob: Student behavior-policy log probabilities for sampled
+            response tokens, shape ``(batch, response_length)``.
+        log_prob: Current student log probabilities for sampled response
+            tokens, shape ``(batch, response_length)``.
+        advantages: Sampled-token OPD rewards/advantages, shape
+            ``(batch, response_length)``.
+        response_mask: Response-token mask, shape ``(batch, response_length)``.
+        teacher_entropy: Teacher entropy at every response position.
+        teacher_topk_log_probs: Teacher full-vocabulary log probabilities for
+            the teacher top-k token ids, shape ``(batch, response_length, k)``.
+        student_topk_log_probs: Current student full-vocabulary log
+            probabilities on the same teacher top-k token ids.
+
+    Returns:
+        The vanilla sampled-token OPD loss plus the entropy-gated forward-KL
+        term, together with EOPD metrics.
+    """
+    if config is None:
+        raise ValueError("config is required for EOPD policy loss")
+    if teacher_entropy is None or teacher_topk_log_probs is None or student_topk_log_probs is None:
+        raise ValueError(
+            "EOPD requires teacher_entropy, teacher_topk_log_probs, and "
+            "student_topk_log_probs"
+        )
+
+    if teacher_topk_log_probs.shape != student_topk_log_probs.shape:
+        raise ValueError(
+            "teacher_topk_log_probs and student_topk_log_probs must have the "
+            f"same shape, got {teacher_topk_log_probs.shape} and "
+            f"{student_topk_log_probs.shape}"
+        )
+    if teacher_topk_log_probs.shape[:-1] != response_mask.shape:
+        raise ValueError(
+            "EOPD top-k log probabilities must align with response_mask, "
+            f"got {teacher_topk_log_probs.shape[:-1]} and {response_mask.shape}"
+        )
+    if teacher_entropy.shape != response_mask.shape:
+        raise ValueError(
+            "teacher_entropy must align with response_mask, "
+            f"got {teacher_entropy.shape} and {response_mask.shape}"
+        )
+
+    base_loss, pg_metrics = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+        format_mask=format_mask,
+    )
+
+    policy_loss_config = config.policy_loss
+    entropy_threshold = policy_loss_config.get("eopd_entropy_threshold", 0.8)
+    forward_kl_coef = policy_loss_config.get("eopd_forward_kl_coef", 1.0)
+
+    # The teacher reward worker returns full-vocabulary log probabilities for
+    # its top-k ids.  Renormalizing here produces the paper's \tilde{p}_teacher.
+    teacher_topk_log_probs = teacher_topk_log_probs.detach()
+    student_topk_log_probs = student_topk_log_probs.float()
+    teacher_topk_log_probs = teacher_topk_log_probs - torch.logsumexp(
+        teacher_topk_log_probs, dim=-1, keepdim=True
+    )
+    teacher_topk_probs = torch.exp(teacher_topk_log_probs)
+    forward_kl_per_token = torch.sum(
+        teacher_topk_probs * (teacher_topk_log_probs - student_topk_log_probs),
+        dim=-1,
+    )
+
+    high_entropy_mask = (
+        response_mask
+        * (teacher_entropy > entropy_threshold).to(dtype=response_mask.dtype)
+    )
+    valid_tokens = response_mask.sum().clamp_min(1.0)
+    forward_kl_loss = (
+        (forward_kl_per_token * high_entropy_mask).sum() / valid_tokens
+    ) * forward_kl_coef
+
+    high_entropy_tokens = high_entropy_mask.sum()
+    valid_token_count = response_mask.sum().clamp_min(1.0)
+    if high_entropy_tokens.item() > 0:
+        high_entropy_forward_kl = (
+            (forward_kl_per_token * high_entropy_mask).sum() / high_entropy_tokens
+        )
+    else:
+        high_entropy_forward_kl = forward_kl_per_token.sum() * 0.0
+
+    pg_metrics.update(
+        {
+            "actor/eopd_forward_kl_loss": forward_kl_loss.detach().item(),
+            "actor/eopd_forward_kl": high_entropy_forward_kl.detach().item(),
+            "actor/eopd_high_entropy_ratio": (
+                high_entropy_tokens / valid_token_count
+            ).detach().item(),
+            "actor/eopd_high_entropy_tokens": high_entropy_tokens.detach().item(),
+        }
+    )
+    return base_loss + forward_kl_loss, pg_metrics
+
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,

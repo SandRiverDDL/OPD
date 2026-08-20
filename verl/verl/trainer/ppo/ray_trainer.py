@@ -1130,12 +1130,15 @@ class RayPPOTrainer:
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            batch.meta_info["eopd_enabled"] = self.config.actor_rollout_ref.rollout.get(
+                                "eopd_enabled", False
+                            )
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
 
-                            if top_k > 0:
+                            if top_k > 0 and not batch.meta_info.get("eopd_enabled", False):
                                 # All distillation reward calculation is now moved to GPU worker (actor_rollout_wg)
                                 # for efficiency and to reduce CPU tensor ops.
                                 # compute_distillation_reward computes S_on_T and then rm_scores.
@@ -2231,15 +2234,9 @@ class RayPPOTrainer:
                             traceback.print_exc()
 
                     # Pop unused keys to save memory before PPO update
-                    keys_to_pop = [
-                        "teacher_on_student_log_probs",
-                        "teacher_top_k_ids",
-                        "teacher_top_k_log_probs",
-                        "teacher_entropy",
-                        "overlap_mask",
-                        "teacher_in_student_mask",
-                        "student_log_probs_on_teacher_ids",
-                    ]
+                    keys_to_pop = ["teacher_on_student_log_probs", "overlap_mask", "teacher_in_student_mask", "student_log_probs_on_teacher_ids"]
+                    if not batch.meta_info.get("eopd_enabled", False):
+                        keys_to_pop.extend(["teacher_top_k_ids", "teacher_top_k_log_probs", "teacher_entropy"])
                     for key in keys_to_pop:
                         if key in batch.batch.keys():
                             batch.batch.pop(key)

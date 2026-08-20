@@ -1,0 +1,19 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_prompt32_step80_lr3e-6_eopd_20260821
+  description: >
+    Entropy-Aware On-Policy Distillation on the sampled-token OPD path:
+    teacher top-k forward KL is enabled at high-entropy response positions.
+
+rollout:
+  eopd_enabled: true
+  eopd_top_k: 16
+  eopd_entropy_threshold: 0.8
+  eopd_forward_kl_coef: 1.0
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 80
+  learning_rate: 3.0e-6

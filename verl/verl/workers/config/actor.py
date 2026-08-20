@@ -41,6 +41,9 @@ class PolicyLossConfig(BaseConfig):
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        eopd_entropy_threshold (float): Teacher entropy threshold above
+            which EOPD activates its forward-KL term.
+        eopd_forward_kl_coef (float): Coefficient for EOPD's forward-KL term.
     """
 
     loss_mode: str = "vanilla"
@@ -49,6 +52,8 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+    eopd_entropy_threshold: float = 0.8
+    eopd_forward_kl_coef: float = 1.0
 
 
 @dataclass

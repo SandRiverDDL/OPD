@@ -177,6 +177,13 @@ def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str
     prompt_batch = int(train_cfg["prompt_batch_size"])
     mini_batch = int(train_cfg["ppo_mini_batch_size"])
     n_responses = int(rollout_cfg["n_responses"])
+    if rollout_cfg.get("eopd_enabled", False):
+        eopd_top_k = int(rollout_cfg.get("eopd_top_k", 16))
+        if eopd_top_k <= 0:
+            raise ValueError("EOPD requires rollout.eopd_top_k to be positive")
+        # EOPD uses the existing top-k collection path to obtain the
+        # teacher distribution used by its forward-KL auxiliary loss.
+        rollout_cfg["log_prob_top_k"] = eopd_top_k
     world_size = int(system_cfg["n_gpus_per_node"]) * int(system_cfg["nnodes"])
     if prompt_batch <= 0 or mini_batch <= 0 or n_responses <= 0:
         raise ValueError("prompt_batch_size, ppo_mini_batch_size and n_responses must be positive")
@@ -267,6 +274,20 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         hydra_arg("+actor_rollout_ref.rollout.top_k_strategy", rollout_cfg["top_k_strategy"]),
         hydra_arg("+actor_rollout_ref.rollout.reward_weight_mode", rollout_cfg["reward_weight_mode"]),
         hydra_arg("+actor_rollout_ref.rollout.teacher_temperature", rollout_cfg["teacher_temperature"]),
+        hydra_arg("actor_rollout_ref.rollout.eopd_enabled", rollout_cfg.get("eopd_enabled", False)),
+        hydra_arg("actor_rollout_ref.rollout.eopd_top_k", rollout_cfg.get("eopd_top_k", 16)),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.loss_mode",
+            "eopd" if rollout_cfg.get("eopd_enabled", False) else "vanilla",
+        ),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.eopd_entropy_threshold",
+            rollout_cfg.get("eopd_entropy_threshold", 0.8),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.eopd_forward_kl_coef",
+            rollout_cfg.get("eopd_forward_kl_coef", 1.0),
+        ),
         hydra_arg(
             "actor_rollout_ref.rollout.tensor_model_parallel_size",
             system_cfg["parallel_size"],

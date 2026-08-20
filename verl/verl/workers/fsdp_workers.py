@@ -2611,6 +2611,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
+            eopd_enabled = data.meta_info.get("eopd_enabled", self.config.get("eopd_enabled", False))
             
             output_logp = []
             output_on_student_logp = []
@@ -2709,11 +2710,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 if teacher_in_student_mask is not None:
                     teacher_in_student_mask = teacher_in_student_mask[revert_indices]
 
-            if top_k > 0:
+            if top_k > 0 and not eopd_enabled:
                 # Reward calculation is moved to ray_trainer for top_k > 0
                 # because it needs student_on_teacher_log_probs which requires another actor forward
-                rm_scores = None 
+                rm_scores = None
                 overlap_mask = teacher_overlap_mask
+            elif top_k > 0 and eopd_enabled:
+                # EOPD keeps the existing sampled-token reverse-KL reward and
+                # uses teacher top-k probabilities only for its auxiliary
+                # forward-KL policy-loss term.
+                reverse_kl = student_logp - teacher_logp
+                rm_scores = -reverse_kl
+                overlap_mask = None
             else:
                 print("Top-k log probs not present, just using student_logp - teacher_logp as reward")
                 
@@ -2727,7 +2735,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if rm_scores is not None:
                 tensors["rm_scores"] = rm_scores
             
-            if teacher_on_student_logp is not None:
+            if teacher_on_student_logp is not None and not eopd_enabled:
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp
 
             if teacher_top_k_ids is not None:
@@ -2739,7 +2747,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if teacher_entropy is not None:
                 tensors["teacher_entropy"] = teacher_entropy
                 
-            if teacher_valid_counts is not None:
+            if teacher_valid_counts is not None and not eopd_enabled:
                 tensors["teacher_valid_counts"] = teacher_valid_counts
             if overlap_mask is not None:
                 tensors["overlap_mask"] = overlap_mask
