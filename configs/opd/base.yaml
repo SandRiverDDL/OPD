@@ -54,6 +54,24 @@ rollout:
   vllm_gpu_memory_utilization: 0.85
   val_n: 16
 
+# Independent evaluation defaults for scripts/val/eval/gen_vllm.py.
+# Experiment-specific YAML files may override this section.
+evaluation:
+  task: MATH-500
+  data_path: scripts/val/data/MATH-500/test.parquet
+  n: 1
+  enable_thinking: false
+  max_tokens: 31744
+  max_model_len: 33792
+  temperature: 0.7
+  top_p: 0.95
+  seed: null
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  max_num_seqs: 32
+  max_num_batched_tokens: 32768
+  gpu_memory_utilization: 0.90
+  replace: false
+
 training:
   prompt_batch_size: 64
   ppo_mini_batch_size: 64

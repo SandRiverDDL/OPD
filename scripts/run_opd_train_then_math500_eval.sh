@@ -94,11 +94,13 @@ echo "[$(date)] generating MATH-500 with the final checkpoint" | tee -a "$EVAL_L
   cd "$ROOT_DIR/scripts/val/eval"
   EVAL_MODEL_PATH="$MERGED_MODEL_PATH" \
   EVAL_MODEL_NAME="$EVAL_MODEL_NAME" \
-  EVAL_BATCH_SIZE=16 \
   EVAL_GPUS=0,1,2,3,4,5,6,7 \
+  EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-32}" \
+  EVAL_MAX_NUM_BATCHED_TOKENS="${EVAL_MAX_NUM_BATCHED_TOKENS:-32768}" \
+  EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}" \
   EVAL_MAX_TOKENS=7168 \
   EVAL_MAX_MODEL_LEN=8192 \
-  python gen_vllm.py --disable-thinking
+  python gen_vllm.py
   EVAL_NAME="$EVAL_MODEL_NAME" \
   EVAL_MODEL_PATH="$MERGED_MODEL_PATH" \
   python grade.py

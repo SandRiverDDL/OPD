@@ -159,10 +159,15 @@ We reuse the evaluation pipeline from [JustRL](https://github.com/thunlp/JustRL)
 
 ```bash
 cd scripts/val/eval
-python gen_vllm.py
+python gen_vllm.py \
+  --config configs/opd/base.yaml \
+  --model-path /path/to/checkpoint \
+  --model-name my-checkpoint
 ```
 
-Before running generation, set `MODEL_NAMES` in `gen_vllm.py` to the checkpoint(s) you want to evaluate. And set appropriate `available_workers`.
+评估协议（任务、采样次数、最大生成长度、thinking、GPU 和 vLLM
+scheduler 参数）写在 YAML 的 `evaluation` 段中；要评估的 checkpoint 和
+输出名称通过命令行指定。具体实验配置可以继承 `configs/opd/base.yaml`。
 
 **Grading**
 

@@ -147,8 +147,8 @@ python gen_vllm.py
 
 脚本当前是按每张 GPU 启动一个 vLLM worker，默认使用 GPU `0` 到 `7`。
 如果 GPU 数量不同，需要同步修改 `available_gpus`。不过当前
-`MATH-500` 的 `N=1` 配置下，只有第一个 worker 实际承担 rollout，
-其余 worker 仍会加载模型但没有 rollout ID，存在显存和进程开销。
+`MATH-500` 的 `N=1` 配置下，题目会均分到各个 GPU worker，每个 worker
+加载一个 TP=1 vLLM 副本并处理自己的 shard。
 
 然后执行：
 
@@ -160,11 +160,11 @@ python gen_vllm.py
 也可以控制是否启用模型的 thinking template：
 
 ```bash
-python gen_vllm.py --enable-thinking
+python gen_vllm.py --config configs/opd/experiments/opd_sky7b_sampled_token.yaml
 ```
 
 ```bash
-python gen_vllm.py --disable-thinking
+python gen_vllm.py --config configs/opd/base.yaml
 ```
 
 生成结果写入：
@@ -174,35 +174,63 @@ scripts/val/eval/justrl_eval_outputs/<model-name>/
 ```
 
 当前默认评测任务为 `MATH-500`，每道题生成 `N=1` 个 response。当前实现按
-题目做数据并行分片，每个 GPU worker 再按 batch 调用
-`llm.generate(...)`，不会把全部 500 道题塞进单次调用。默认采样参数和最大生成长度在
-`gen_vllm.py` 顶部修改：
+题目做数据并行分片，每个 GPU worker 将自己的 shard 一次提交给
+`llm.generate(...)`，由 vLLM 内部 scheduler 按 token budget 和并发序列数进行
+continuous batching，避免 Python 层固定 batch 的长尾等待。默认采样参数和最大
+生成长度写在 OPD YAML 的 `evaluation` 段中：
 
 ```python
-MAX_TOKENS = 31744
-TEMPERATURE = 0.7
-TOP_P = 0.95
+evaluation:
+  task: MATH-500
+  data_path: scripts/val/data/MATH-500/test.parquet
+  n: 1
+  enable_thinking: false
+  max_tokens: 31744
+  max_model_len: 33792
+  temperature: 0.7
+  top_p: 0.95
 ```
 
-当前实现已按题目做 8 卡数据并行分片，并按每批 32 道题调用 vLLM；
-可以通过 `EVAL_BATCH_SIZE` 和 `EVAL_GPUS` 覆盖默认值：
+当前实现已按题目做 8 卡数据并行分片。可以通过 `EVAL_GPUS`、
+`EVAL_MAX_NUM_SEQS`、`EVAL_MAX_NUM_BATCHED_TOKENS` 和
+`EVAL_GPU_MEMORY_UTILIZATION` 调整每个 vLLM worker 的调度上限和显存使用率：
 
 ```bash
-EVAL_BATCH_SIZE=16 \
 EVAL_GPUS=0,1,2,3,4,5,6,7 \
+EVAL_MAX_NUM_SEQS=32 \
+EVAL_MAX_NUM_BATCHED_TOKENS=32768 \
+EVAL_GPU_MEMORY_UTILIZATION=0.90 \
 EVAL_MODEL_PATH=/path/to/checkpoint \
 python gen_vllm.py
 ```
+
+使用实验 YAML 时，评估配置按 `extends` 合并读取：
+
+```bash
+python gen_vllm.py \
+  --config configs/opd/experiments/opd_sky7b_poweropd_step120_20260821.yaml \
+  --model-path checkpoint/opd_sky7b_poweropd_step120_20260821/hf_step120 \
+  --model-name opd_sky7b_poweropd_step120_20260821_step120
+```
+
+命令行参数优先级为：CLI > YAML `evaluation` > 旧版环境变量 > 默认值。
+模型 checkpoint 和输出名称通常通过 CLI 指定；评测协议则保存在 YAML 中。
 
 本次已验证的 DeepSeek 1.5B MATH-500 命令：
 
 ```bash
 EVAL_MODEL_PATH=/path/to/DeepSeek-R1-Distill-Qwen-1.5B \
 EVAL_MODEL_NAME=DeepSeek-R1-Distill-Qwen-1.5B \
-EVAL_BATCH_SIZE=16 \
 EVAL_GPUS=0,1,2,3,4,5,6,7 \
-python gen_vllm.py --disable-thinking
+EVAL_MAX_NUM_SEQS=32 \
+EVAL_MAX_NUM_BATCHED_TOKENS=32768 \
+python gen_vllm.py --config configs/opd/base.yaml
 ```
+
+worker 完成后会打印输入/输出 token 数、生成耗时和
+`generation_tokens_per_second`，可据此调节上述参数。`EVAL_BATCH_SIZE` 仍可作为
+旧命令的兼容 fallback，但不再控制 Python 层的外部 batch；新命令应优先使用
+`EVAL_MAX_NUM_SEQS`。
 
 ### 4.3 规则打分
 
@@ -246,8 +274,8 @@ MODEL_NAME = "../../model/CompassVerifier-3B"
   vLLM 请求，不能通过命令行设置成独立的“512 batch”。500 小于 512，
   但 `MAX_TOKENS=31744` 时请求的潜在 KV cache 很大，不建议把“512”
   理解为 512 道题都同时完整生成；vLLM 会受显存和调度配置限制。
-- 如果要稳定控制显存，应给 `gen_vllm.py` 增加分块 batch 逻辑，例如每批
-  32/64/128 道题，而不是简单把 500 道题全部塞进一次 `generate`。
+- 如果要稳定控制显存，应优先调节 `EVAL_MAX_NUM_SEQS` 和
+  `EVAL_MAX_NUM_BATCHED_TOKENS`，而不是恢复 Python 层固定 batch。
 - `gen_vllm.py` 和 `grade.py` 含有实验作者的固定路径、模型名和 GPU 数量，
   执行前需要先检查顶部配置。
 - `gen_vllm.py` 会跳过已经存在的结果文件；如果要重新生成，需要修改

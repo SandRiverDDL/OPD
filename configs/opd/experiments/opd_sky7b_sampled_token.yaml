@@ -14,6 +14,17 @@ model:
 rollout:
   log_prob_top_k: 0
 
+evaluation:
+  task: AIME25
+  data_path: scripts/val/data/AIME25/test.parquet
+  n: 16
+  enable_thinking: true
+  max_tokens: 31744
+  max_model_len: 33792
+  max_num_seqs: 64
+  max_num_batched_tokens: 32768
+  gpu_memory_utilization: 0.90
+
 training:
   prompt_batch_size: 32
   ppo_mini_batch_size: 32
