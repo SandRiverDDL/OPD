@@ -169,6 +169,7 @@ def resolve_distillation_config(config: dict[str, Any]) -> str:
 
 def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     config = expand(load_yaml_with_extends(config_path))
+    resume_requested = "resume" in config
     env_cfg = config["environment"]
     data_cfg = config["data"]
     model_cfg = config["model"]
@@ -177,6 +178,31 @@ def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str
     train_cfg = config["training"]
     system_cfg = config["system"]
     resolve_distillation_config(config)
+
+    resume_cfg = config.get("resume", {})
+    resume_mode = str(resume_cfg.get("mode", "auto"))
+    resume_from_path = resume_cfg.get("path")
+    if resume_mode not in {"auto", "disable", "resume_path"}:
+        raise ValueError(
+            f"Unsupported resume.mode={resume_mode!r}; "
+            "expected auto, disable, or resume_path"
+        )
+    if resume_mode == "resume_path":
+        if not resume_from_path:
+            raise ValueError("resume.path is required when resume.mode=resume_path")
+        resume_path = repo_path(repo_root, str(resume_from_path))
+        if not resume_path.is_dir():
+            raise FileNotFoundError(f"resume checkpoint does not exist: {resume_path}")
+        if "global_step_" not in resume_path.name:
+            raise ValueError(
+                f"resume checkpoint must be a global_step_* directory: {resume_path}"
+            )
+        resume_cfg["path"] = str(resume_path)
+    config["resume"] = {
+        "mode": resume_mode,
+        "path": resume_cfg.get("path"),
+    }
+    config["_resume_requested"] = resume_requested
 
     hf_home = os.environ.get("HF_HOME")
     candidates = []
@@ -386,7 +412,10 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         hydra_arg("trainer.total_training_steps", train_cfg["total_training_steps"]),
         hydra_arg("trainer.default_local_dir", str(paths["ckpt_path"])),
         hydra_arg("trainer.is_plot", system_cfg["is_plot"]),
+        hydra_arg("trainer.resume_mode", config["resume"]["mode"]),
     ]
+    if config["resume"]["path"] is not None:
+        args.append(hydra_arg("trainer.resume_from_path", config["resume"]["path"]))
     return args
 
 
@@ -437,7 +466,7 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    if paths["ckpt_path"].exists():
+    if paths["ckpt_path"].exists() and not config["_resume_requested"]:
         raise FileExistsError(
             f"Checkpoint directory already exists; refusing to overwrite: {paths['ckpt_path']}"
         )
