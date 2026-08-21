@@ -1,0 +1,19 @@
+extends: opd_sky7b_sampled_token.yaml
+
+experiment:
+  # Keep the original experiment name and checkpoint directory so that
+  # global_step_140..300 are appended to the existing 120-step run.
+  name: opd_sky7b_sampled_token
+  description: >
+    Continue the Skywork-OR1-Math-7B sampled-token OPD run from global_step_120
+    to a total of 300 optimizer steps.
+
+training:
+  total_training_steps: 300
+
+system:
+  save_freq: 20
+
+resume:
+  mode: resume_path
+  path: checkpoint/opd_sky7b_sampled_token/global_step_120
