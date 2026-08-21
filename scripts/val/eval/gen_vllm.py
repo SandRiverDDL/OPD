@@ -22,10 +22,11 @@ MODEL_DISPLAY_NAMES = {
 
 EVAL_TASK = os.environ.get("EVAL_TASK", "MATH-500")
 EVAL_TASK_N = int(os.environ.get("EVAL_N", "1"))
+EVAL_DATA_PATH = os.environ.get("EVAL_DATA_PATH")
 TASKS = [
     {
         "name": EVAL_TASK,
-        "path": f"{DATA_DIR}/{EVAL_TASK}/test.parquet",
+        "path": EVAL_DATA_PATH or f"{DATA_DIR}/{EVAL_TASK}/test.parquet",
         "N": EVAL_TASK_N,
     },
 ]
