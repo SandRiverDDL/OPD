@@ -112,6 +112,61 @@ def hydra_arg(key: str, value: Any) -> str:
     return f"{key}={value}"
 
 
+def resolve_distillation_config(config: dict[str, Any]) -> str:
+    """Resolve the user-facing distillation method into internal rollout fields."""
+    rollout_cfg = config["rollout"]
+    distillation_cfg = config.get("distillation", {})
+    method = str(distillation_cfg.get("method", "vanilla")).lower()
+
+    # Preserve compatibility with the pre-selector EOPD configuration.
+    if method == "vanilla" and rollout_cfg.get("eopd_enabled", False):
+        method = "eopd"
+
+    if method not in {"vanilla", "eopd", "poweropd"}:
+        raise ValueError(
+            f"Unsupported distillation.method={method!r}; expected vanilla, eopd, or poweropd"
+        )
+
+    params = distillation_cfg.get("params") or {}
+    if not isinstance(params, dict):
+        raise ValueError("distillation.params must be a mapping")
+
+    rollout_cfg["distillation_method"] = method
+    rollout_cfg["eopd_enabled"] = method == "eopd"
+    rollout_cfg["poweropd_reward_alpha"] = 5.0
+
+    if method == "eopd":
+        eopd_top_k = int(params.get("top_k", rollout_cfg.get("eopd_top_k", 16)))
+        entropy_threshold = float(
+            params.get("entropy_threshold", rollout_cfg.get("eopd_entropy_threshold", 0.8))
+        )
+        forward_kl_coef = float(
+            params.get("forward_kl_coef", rollout_cfg.get("eopd_forward_kl_coef", 1.0))
+        )
+        if eopd_top_k <= 0:
+            raise ValueError("EOPD requires distillation.params.top_k to be positive")
+        if entropy_threshold < 0:
+            raise ValueError("EOPD entropy_threshold must be non-negative")
+        if forward_kl_coef < 0:
+            raise ValueError("EOPD forward_kl_coef must be non-negative")
+        rollout_cfg["eopd_top_k"] = eopd_top_k
+        rollout_cfg["eopd_entropy_threshold"] = entropy_threshold
+        rollout_cfg["eopd_forward_kl_coef"] = forward_kl_coef
+        # EOPD reuses the top-k collection path for its auxiliary forward KL.
+        rollout_cfg["log_prob_top_k"] = eopd_top_k
+    elif method == "poweropd":
+        alpha = float(params.get("alpha", 5.0))
+        if alpha <= 0:
+            raise ValueError("PowerOPD requires distillation.params.alpha to be positive")
+        rollout_cfg["poweropd_reward_alpha"] = alpha
+        # PowerOPD only needs the sampled token's teacher/student log-probs.
+        rollout_cfg["log_prob_top_k"] = 0
+
+    config.setdefault("distillation", {})["method"] = method
+    config["distillation"]["params"] = dict(params)
+    return method
+
+
 def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     config = expand(load_yaml_with_extends(config_path))
     env_cfg = config["environment"]
@@ -121,6 +176,7 @@ def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str
     rollout_cfg = config["rollout"]
     train_cfg = config["training"]
     system_cfg = config["system"]
+    resolve_distillation_config(config)
 
     hf_home = os.environ.get("HF_HOME")
     candidates = []
@@ -177,13 +233,6 @@ def build_effective_config(repo_root: Path, config_path: Path) -> tuple[dict[str
     prompt_batch = int(train_cfg["prompt_batch_size"])
     mini_batch = int(train_cfg["ppo_mini_batch_size"])
     n_responses = int(rollout_cfg["n_responses"])
-    if rollout_cfg.get("eopd_enabled", False):
-        eopd_top_k = int(rollout_cfg.get("eopd_top_k", 16))
-        if eopd_top_k <= 0:
-            raise ValueError("EOPD requires rollout.eopd_top_k to be positive")
-        # EOPD uses the existing top-k collection path to obtain the
-        # teacher distribution used by its forward-KL auxiliary loss.
-        rollout_cfg["log_prob_top_k"] = eopd_top_k
     world_size = int(system_cfg["n_gpus_per_node"]) * int(system_cfg["nnodes"])
     if prompt_batch <= 0 or mini_batch <= 0 or n_responses <= 0:
         raise ValueError("prompt_batch_size, ppo_mini_batch_size and n_responses must be positive")
@@ -211,6 +260,7 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
     train_cfg = config["training"]
     system_cfg = config["system"]
     experiment_cfg = config["experiment"]
+    distillation_method = rollout_cfg.get("distillation_method", "vanilla")
 
     test_files = json.dumps([str(paths["test_dataset"])], separators=(",", ":"))
     max_model_len = max(
@@ -274,11 +324,16 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         hydra_arg("+actor_rollout_ref.rollout.top_k_strategy", rollout_cfg["top_k_strategy"]),
         hydra_arg("+actor_rollout_ref.rollout.reward_weight_mode", rollout_cfg["reward_weight_mode"]),
         hydra_arg("+actor_rollout_ref.rollout.teacher_temperature", rollout_cfg["teacher_temperature"]),
+        hydra_arg("actor_rollout_ref.rollout.distillation_method", distillation_method),
+        hydra_arg(
+            "actor_rollout_ref.rollout.poweropd_reward_alpha",
+            rollout_cfg.get("poweropd_reward_alpha", 5.0),
+        ),
         hydra_arg("actor_rollout_ref.rollout.eopd_enabled", rollout_cfg.get("eopd_enabled", False)),
         hydra_arg("actor_rollout_ref.rollout.eopd_top_k", rollout_cfg.get("eopd_top_k", 16)),
         hydra_arg(
             "actor_rollout_ref.actor.policy_loss.loss_mode",
-            "eopd" if rollout_cfg.get("eopd_enabled", False) else "vanilla",
+            "eopd" if distillation_method == "eopd" else "vanilla",
         ),
         hydra_arg(
             "actor_rollout_ref.actor.policy_loss.eopd_entropy_threshold",
@@ -353,6 +408,9 @@ def print_summary(config: dict[str, Any], paths: dict[str, Path], command: list[
     print(f"  ppo_mini_batch_size={train_cfg['ppo_mini_batch_size']}")
     print(f"  total_training_steps={train_cfg['total_training_steps']}")
     print(f"  learning_rate={train_cfg['learning_rate']}")
+    print(f"  distillation_method={rollout_cfg.get('distillation_method', 'vanilla')}")
+    if rollout_cfg.get("distillation_method") == "poweropd":
+        print(f"  poweropd_reward_alpha={rollout_cfg['poweropd_reward_alpha']}")
     print(f"  vllm_max_num_seqs={rollout_cfg['vllm_max_num_seqs']}")
     print(f"  vllm_max_num_batched_tokens={rollout_cfg['vllm_max_num_batched_tokens']}")
     print(f"  student={paths['student']}")

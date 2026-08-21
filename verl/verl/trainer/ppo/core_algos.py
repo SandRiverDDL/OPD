@@ -978,6 +978,35 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     return loss
 
 
+def compute_poweropd_reward(
+    teacher_log_prob: torch.Tensor,
+    student_log_prob: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    """Compute the bounded PowerOPD sampled-token reward.
+
+    PowerOPD replaces the vanilla sampled-token OPD reward
+    ``log p_teacher - log p_student`` with
+    ``p_teacher**alpha - p_student**alpha``.  The caller is responsible for
+    treating the returned reward as a stop-gradient signal, as is done for
+    all token-level OPD rewards in the trainer.
+    """
+    if alpha <= 0:
+        raise ValueError(f"PowerOPD alpha must be positive, got {alpha}")
+    if teacher_log_prob.shape != student_log_prob.shape:
+        raise ValueError(
+            "PowerOPD teacher and student log probabilities must have the "
+            f"same shape, got {teacher_log_prob.shape} and {student_log_prob.shape}"
+        )
+
+    # Compute in float32 even when the teacher worker uses autocast.  Since
+    # log-probabilities are non-positive, exp(alpha * log_prob) is bounded in
+    # [0, 1], and the reward is consequently bounded in [-1, 1].
+    teacher_prob_power = torch.exp(teacher_log_prob.float() * alpha)
+    student_prob_power = torch.exp(student_log_prob.float() * alpha)
+    return (teacher_prob_power - student_prob_power).detach()
+
+
 @deprecated("verl.trainer.ppo.core_algos.compute_policy_loss_vanilla")
 def compute_policy_loss(
     old_log_prob,

@@ -1124,12 +1124,27 @@ class RayPPOTrainer:
                             batch.meta_info["global_steps"] = self.global_steps
                             batch.meta_info["is_plot"] = self.config.trainer.get("is_plot", False)
                             teacher_temperature = self.config.actor_rollout_ref.rollout.get("teacher_temperature", 1.0)
+                            distillation_method = self.config.actor_rollout_ref.rollout.get(
+                                "distillation_method",
+                                "vanilla",
+                            )
+                            if (
+                                self.config.actor_rollout_ref.rollout.get("eopd_enabled", False)
+                                and distillation_method == "vanilla"
+                            ):
+                                # Backward compatibility for pre-method-selector EOPD configs.
+                                distillation_method = "eopd"
 
                             batch.meta_info["log_prob_top_k"] = top_k
                             batch.meta_info["top_k_strategy"] = strategy
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            batch.meta_info["distillation_method"] = distillation_method
+                            batch.meta_info["poweropd_reward_alpha"] = self.config.actor_rollout_ref.rollout.get(
+                                "poweropd_reward_alpha",
+                                5.0,
+                            )
                             batch.meta_info["eopd_enabled"] = self.config.actor_rollout_ref.rollout.get(
                                 "eopd_enabled", False
                             )
@@ -1138,7 +1153,7 @@ class RayPPOTrainer:
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
 
-                            if top_k > 0 and not batch.meta_info.get("eopd_enabled", False):
+                            if top_k > 0 and distillation_method != "eopd":
                                 # All distillation reward calculation is now moved to GPU worker (actor_rollout_wg)
                                 # for efficiency and to reduce CPU tensor ops.
                                 # compute_distillation_reward computes S_on_T and then rm_scores.
@@ -2235,7 +2250,7 @@ class RayPPOTrainer:
 
                     # Pop unused keys to save memory before PPO update
                     keys_to_pop = ["teacher_on_student_log_probs", "overlap_mask", "teacher_in_student_mask", "student_log_probs_on_teacher_ids"]
-                    if not batch.meta_info.get("eopd_enabled", False):
+                    if batch.meta_info.get("distillation_method", "vanilla") != "eopd":
                         keys_to_pop.extend(["teacher_top_k_ids", "teacher_top_k_log_probs", "teacher_entropy"])
                     for key in keys_to_pop:
                         if key in batch.batch.keys():

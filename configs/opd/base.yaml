@@ -37,6 +37,10 @@ length:
   max_response: 7168
   max_val_response: 7168
 
+distillation:
+  method: vanilla
+  params: {}
+
 rollout:
   n_responses: 4
   temperature: 1.0
@@ -45,10 +49,6 @@ rollout:
   log_prob_top_k: 16
   top_k_strategy: only_stu
   reward_weight_mode: student_p
-  eopd_enabled: false
-  eopd_top_k: 16
-  eopd_entropy_threshold: 0.8
-  eopd_forward_kl_coef: 1.0
   vllm_max_num_seqs: 16
   vllm_max_num_batched_tokens: 65536
   vllm_gpu_memory_utilization: 0.85

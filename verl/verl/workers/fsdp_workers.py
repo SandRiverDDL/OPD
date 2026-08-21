@@ -49,6 +49,7 @@ from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.trainer.ppo.core_algos import compute_poweropd_reward
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -2611,7 +2612,20 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
+            distillation_method = data.meta_info.get(
+                "distillation_method",
+                self.config.get("distillation_method", "vanilla"),
+            )
             eopd_enabled = data.meta_info.get("eopd_enabled", self.config.get("eopd_enabled", False))
+            if eopd_enabled and distillation_method == "vanilla":
+                # Backward compatibility for pre-method-selector EOPD configs.
+                distillation_method = "eopd"
+            poweropd_alpha = float(
+                data.meta_info.get(
+                    "poweropd_reward_alpha",
+                    self.config.get("poweropd_reward_alpha", 5.0),
+                )
+            )
             
             output_logp = []
             output_on_student_logp = []
@@ -2710,12 +2724,26 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 if teacher_in_student_mask is not None:
                     teacher_in_student_mask = teacher_in_student_mask[revert_indices]
 
-            if top_k > 0 and not eopd_enabled:
+            if distillation_method == "poweropd":
+                if top_k > 0:
+                    raise ValueError(
+                        "PowerOPD uses the sampled-token reward path and requires "
+                        "rollout.log_prob_top_k=0"
+                    )
+                # PowerOPD's reward is bounded before it reaches the
+                # token_reward_direct advantage estimator.
+                rm_scores = compute_poweropd_reward(
+                    teacher_log_prob=teacher_logp,
+                    student_log_prob=student_logp,
+                    alpha=poweropd_alpha,
+                )
+                overlap_mask = None
+            elif top_k > 0 and distillation_method != "eopd":
                 # Reward calculation is moved to ray_trainer for top_k > 0
                 # because it needs student_on_teacher_log_probs which requires another actor forward
                 rm_scores = None
                 overlap_mask = teacher_overlap_mask
-            elif top_k > 0 and eopd_enabled:
+            elif top_k > 0 and distillation_method == "eopd":
                 # EOPD keeps the existing sampled-token reverse-KL reward and
                 # uses teacher top-k probabilities only for its auxiliary
                 # forward-KL policy-loss term.
@@ -2735,7 +2763,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if rm_scores is not None:
                 tensors["rm_scores"] = rm_scores
             
-            if teacher_on_student_logp is not None and not eopd_enabled:
+            if teacher_on_student_logp is not None and distillation_method != "eopd":
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp
 
             if teacher_top_k_ids is not None:
@@ -2747,7 +2775,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if teacher_entropy is not None:
                 tensors["teacher_entropy"] = teacher_entropy
                 
-            if teacher_valid_counts is not None and not eopd_enabled:
+            if teacher_valid_counts is not None and distillation_method != "eopd":
                 tensors["teacher_valid_counts"] = teacher_valid_counts
             if overlap_mask is not None:
                 tensors["overlap_mask"] = overlap_mask

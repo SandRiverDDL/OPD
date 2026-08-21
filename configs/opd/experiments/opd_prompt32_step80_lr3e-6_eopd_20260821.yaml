@@ -6,11 +6,12 @@ experiment:
     Entropy-Aware On-Policy Distillation on the sampled-token OPD path:
     teacher top-k forward KL is enabled at high-entropy response positions.
 
-rollout:
-  eopd_enabled: true
-  eopd_top_k: 16
-  eopd_entropy_threshold: 0.8
-  eopd_forward_kl_coef: 1.0
+distillation:
+  method: eopd
+  params:
+    top_k: 16
+    entropy_threshold: 0.8
+    forward_kl_coef: 1.0
 
 training:
   prompt_batch_size: 32

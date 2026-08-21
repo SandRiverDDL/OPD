@@ -10,15 +10,18 @@ sampled-token OPD 的训练流程，不引入另一套 trainer：
 3. forward-KL 使用 teacher top-k 概率在 top-k 集合内重新归一化的近似，
    student 概率使用同一批 teacher top-k ids 的 full-vocabulary log-prob。
 
-默认参数与论文实验一致：
+推荐通过统一的方法选择字段配置：
 
 ```yaml
-rollout:
-  eopd_enabled: true
-  eopd_top_k: 16
-  eopd_entropy_threshold: 0.8
-  eopd_forward_kl_coef: 1.0
+distillation:
+  method: eopd
+  params:
+    top_k: 16
+    entropy_threshold: 0.8
+    forward_kl_coef: 1.0
 ```
+
+launcher 会把这组用户配置转换为内部的 rollout / policy-loss 字段。
 
 可直接使用的配置文件：
 
@@ -30,5 +33,5 @@ configs/opd/experiments/opd_prompt32_step80_lr3e-6_eopd_20260821.yaml
 EOPD 的训练曲线或 benchmark 结果。运行后应单独记录到
 `docs/experiments/`，不要把未验证的结果写入本文件。
 
-PowerOPD、AOPD 和 TrOPD 暂未实现：这三个名称对应的具体论文公式/
-约束位置尚未在当前仓库中确认，不能根据名称猜测实现。
+PowerOPD 已实现 sampled-token bounded power reward，详见
+`docs/POWEROPD.md`。AOPD 和 TrOPD 暂未实现。
