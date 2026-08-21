@@ -1,0 +1,18 @@
+extends: opd_sky7b_sampled_token.yaml
+
+experiment:
+  name: opd_sky7b_poweropd_step120_20260821
+  description: >
+    PowerOPD sampled-token distillation with Skywork-OR1-Math-7B teacher,
+    alpha=5.0, and 120 optimizer steps.
+
+distillation:
+  method: poweropd
+  params:
+    alpha: 5.0
+
+training:
+  total_training_steps: 120
+
+system:
+  save_freq: 20
