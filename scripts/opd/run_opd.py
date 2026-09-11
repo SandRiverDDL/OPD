@@ -112,20 +112,44 @@ def hydra_arg(key: str, value: Any) -> str:
     return f"{key}={value}"
 
 
+def normalize_cli_distillation_method(method: str) -> str:
+    """Normalize method names without importing the runtime framework.
+
+    The launcher intentionally stays usable for YAML validation and dry-runs
+    before Ray/PyTorch are installed.  Runtime workers use the shared method
+    registry in ``verl.utils.distillation``.
+    """
+
+    aliases = {
+        "prune-opd": "pruneopd",
+        "prune_opd": "pruneopd",
+        "pruned-opd": "pruneopd",
+        "pruned_opd": "pruneopd",
+    }
+    normalized = aliases.get(str(method).strip().lower(), str(method).strip().lower())
+    supported = {"vanilla", "eopd", "poweropd", "aopd", "pruneopd"}
+    if normalized not in supported:
+        raise ValueError(
+            f"Unsupported distillation.method={method!r}; expected one of: "
+            f"{', '.join(sorted(supported))}"
+        )
+    return normalized
+
+
 def resolve_distillation_config(config: dict[str, Any]) -> str:
     """Resolve the user-facing distillation method into internal rollout fields."""
     rollout_cfg = config["rollout"]
     distillation_cfg = config.get("distillation", {})
     method = str(distillation_cfg.get("method", "vanilla")).lower()
 
-    # Preserve compatibility with the pre-selector EOPD configuration.
+    # Preserve compatibility with the pre-selector EOPD/Prune-OPD configs.
     if method == "vanilla" and rollout_cfg.get("eopd_enabled", False):
         method = "eopd"
+    prune_cfg = rollout_cfg.get("prune_opd", {})
+    if method == "vanilla" and isinstance(prune_cfg, dict) and prune_cfg.get("enable", False):
+        method = "pruneopd"
 
-    if method not in {"vanilla", "eopd", "poweropd"}:
-        raise ValueError(
-            f"Unsupported distillation.method={method!r}; expected vanilla, eopd, or poweropd"
-        )
+    method = normalize_cli_distillation_method(method)
 
     params = distillation_cfg.get("params") or {}
     if not isinstance(params, dict):
@@ -134,6 +158,10 @@ def resolve_distillation_config(config: dict[str, Any]) -> str:
     rollout_cfg["distillation_method"] = method
     rollout_cfg["eopd_enabled"] = method == "eopd"
     rollout_cfg["poweropd_reward_alpha"] = 5.0
+    rollout_cfg["aopd_threshold"] = float(rollout_cfg.get("aopd_threshold", 0.1))
+    rollout_cfg["aopd_opd_weight"] = float(rollout_cfg.get("aopd_opd_weight", 1.0))
+    rollout_cfg["aopd_gkd_weight"] = float(rollout_cfg.get("aopd_gkd_weight", 1.0))
+    rollout_cfg["aopd_jsd_beta"] = float(rollout_cfg.get("aopd_jsd_beta", 1.0))
 
     if method == "eopd":
         eopd_top_k = int(params.get("top_k", rollout_cfg.get("eopd_top_k", 16)))
@@ -154,6 +182,48 @@ def resolve_distillation_config(config: dict[str, Any]) -> str:
         rollout_cfg["eopd_forward_kl_coef"] = forward_kl_coef
         # EOPD reuses the top-k collection path for its auxiliary forward KL.
         rollout_cfg["log_prob_top_k"] = eopd_top_k
+    elif method == "aopd":
+        aopd_top_k = int(params.get("top_k", rollout_cfg.get("log_prob_top_k", 16)))
+        threshold = float(params.get("threshold", rollout_cfg.get("aopd_threshold", 0.1)))
+        opd_weight = float(params.get("opd_weight", rollout_cfg.get("aopd_opd_weight", 1.0)))
+        gkd_weight = float(params.get("gkd_weight", rollout_cfg.get("aopd_gkd_weight", 1.0)))
+        jsd_beta = float(params.get("jsd_beta", rollout_cfg.get("aopd_jsd_beta", 1.0)))
+        if aopd_top_k <= 0:
+            raise ValueError("AOPD requires distillation.params.top_k to be positive")
+        if threshold < 0:
+            raise ValueError("AOPD threshold must be non-negative")
+        if opd_weight < 0 or gkd_weight < 0:
+            raise ValueError("AOPD opd_weight and gkd_weight must be non-negative")
+        if not 0.0 <= jsd_beta <= 1.0:
+            raise ValueError("AOPD jsd_beta must be in [0, 1]")
+        rollout_cfg["log_prob_top_k"] = aopd_top_k
+        rollout_cfg["aopd_threshold"] = threshold
+        rollout_cfg["aopd_opd_weight"] = opd_weight
+        rollout_cfg["aopd_gkd_weight"] = gkd_weight
+        rollout_cfg["aopd_jsd_beta"] = jsd_beta
+    elif method == "pruneopd":
+        prune_top_k = int(params.get("top_k", rollout_cfg.get("log_prob_top_k", 16)))
+        existing_prune_cfg = rollout_cfg.get("prune_opd", {})
+        metric = str(params.get("metric", existing_prune_cfg.get("metric", "overlap_ratio")))
+        threshold = float(params.get("threshold", existing_prune_cfg.get("threshold", 0.7)))
+        w_drop = float(params.get("w_drop", existing_prune_cfg.get("w_drop", 0.01)))
+        w_base = float(params.get("w_base", existing_prune_cfg.get("w_base", 0.5)))
+        if prune_top_k <= 0:
+            raise ValueError("Prune-OPD requires distillation.params.top_k to be positive")
+        if metric != "overlap_ratio":
+            raise ValueError("This implementation supports only Prune-OPD metric=overlap_ratio")
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError("Prune-OPD threshold must be in (0, 1]")
+        if w_drop < 0 or w_base < 0:
+            raise ValueError("Prune-OPD w_drop and w_base must be non-negative")
+        rollout_cfg["log_prob_top_k"] = prune_top_k
+        rollout_cfg["prune_opd"] = {
+            "enable": True,
+            "metric": metric,
+            "threshold": threshold,
+            "w_drop": w_drop,
+            "w_base": w_base,
+        }
     elif method == "poweropd":
         alpha = float(params.get("alpha", 5.0))
         if alpha <= 0:
@@ -357,9 +427,33 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         ),
         hydra_arg("actor_rollout_ref.rollout.eopd_enabled", rollout_cfg.get("eopd_enabled", False)),
         hydra_arg("actor_rollout_ref.rollout.eopd_top_k", rollout_cfg.get("eopd_top_k", 16)),
+        hydra_arg("actor_rollout_ref.rollout.aopd_threshold", rollout_cfg.get("aopd_threshold", 0.1)),
+        hydra_arg("actor_rollout_ref.rollout.aopd_opd_weight", rollout_cfg.get("aopd_opd_weight", 1.0)),
+        hydra_arg("actor_rollout_ref.rollout.aopd_gkd_weight", rollout_cfg.get("aopd_gkd_weight", 1.0)),
+        hydra_arg("actor_rollout_ref.rollout.aopd_jsd_beta", rollout_cfg.get("aopd_jsd_beta", 1.0)),
+        hydra_arg(
+            "actor_rollout_ref.rollout.prune_opd.enable",
+            rollout_cfg.get("prune_opd", {}).get("enable", False),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.rollout.prune_opd.metric",
+            rollout_cfg.get("prune_opd", {}).get("metric", "overlap_ratio"),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.rollout.prune_opd.threshold",
+            rollout_cfg.get("prune_opd", {}).get("threshold", 0.7),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.rollout.prune_opd.w_drop",
+            rollout_cfg.get("prune_opd", {}).get("w_drop", 0.01),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.rollout.prune_opd.w_base",
+            rollout_cfg.get("prune_opd", {}).get("w_base", 0.5),
+        ),
         hydra_arg(
             "actor_rollout_ref.actor.policy_loss.loss_mode",
-            "eopd" if distillation_method == "eopd" else "vanilla",
+            distillation_method if distillation_method in {"eopd", "aopd"} else "vanilla",
         ),
         hydra_arg(
             "actor_rollout_ref.actor.policy_loss.eopd_entropy_threshold",
@@ -368,6 +462,18 @@ def build_command(config: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         hydra_arg(
             "actor_rollout_ref.actor.policy_loss.eopd_forward_kl_coef",
             rollout_cfg.get("eopd_forward_kl_coef", 1.0),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.aopd_threshold",
+            rollout_cfg.get("aopd_threshold", 0.1),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.aopd_gkd_weight",
+            rollout_cfg.get("aopd_gkd_weight", 1.0),
+        ),
+        hydra_arg(
+            "actor_rollout_ref.actor.policy_loss.aopd_jsd_beta",
+            rollout_cfg.get("aopd_jsd_beta", 1.0),
         ),
         hydra_arg(
             "actor_rollout_ref.rollout.tensor_model_parallel_size",

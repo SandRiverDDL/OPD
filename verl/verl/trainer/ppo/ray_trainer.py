@@ -54,6 +54,10 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.distillation import (
+    should_defer_topk_reward_to_actor,
+    should_keep_teacher_topk_for_update,
+)
 from verl.utils.metric import reduce_metrics
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -1148,12 +1152,23 @@ class RayPPOTrainer:
                             batch.meta_info["eopd_enabled"] = self.config.actor_rollout_ref.rollout.get(
                                 "eopd_enabled", False
                             )
+                            batch.meta_info["aopd_threshold"] = self.config.actor_rollout_ref.rollout.get(
+                                "aopd_threshold", 0.1
+                            )
+                            batch.meta_info["aopd_opd_weight"] = self.config.actor_rollout_ref.rollout.get(
+                                "aopd_opd_weight", 1.0
+                            )
+                            prune_opd_cfg = self.config.actor_rollout_ref.rollout.get("prune_opd", None)
+                            if prune_opd_cfg is not None and prune_opd_cfg.get("enable", False):
+                                batch.meta_info["prune_opd"] = OmegaConf.to_container(
+                                    prune_opd_cfg, resolve=True
+                                )
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
 
-                            if top_k > 0 and distillation_method != "eopd":
+                            if should_defer_topk_reward_to_actor(distillation_method, top_k):
                                 # All distillation reward calculation is now moved to GPU worker (actor_rollout_wg)
                                 # for efficiency and to reduce CPU tensor ops.
                                 # compute_distillation_reward computes S_on_T and then rm_scores.
@@ -2249,8 +2264,20 @@ class RayPPOTrainer:
                             traceback.print_exc()
 
                     # Pop unused keys to save memory before PPO update
-                    keys_to_pop = ["teacher_on_student_log_probs", "overlap_mask", "teacher_in_student_mask", "student_log_probs_on_teacher_ids"]
-                    if batch.meta_info.get("distillation_method", "vanilla") != "eopd":
+                    keys_to_pop = [
+                        "teacher_on_student_log_probs",
+                        "overlap_mask",
+                        "teacher_in_student_mask",
+                        "student_log_probs_on_teacher_ids",
+                        "prune_opd_overlap_ratio",
+                        "prune_opd_bad_event",
+                        "prune_opd_weights",
+                        "prune_opd_loss_weights",
+                        "prune_opd_effective_response_length",
+                    ]
+                    if not should_keep_teacher_topk_for_update(
+                        batch.meta_info.get("distillation_method", "vanilla")
+                    ):
                         keys_to_pop.extend(["teacher_top_k_ids", "teacher_top_k_log_probs", "teacher_entropy"])
                     for key in keys_to_pop:
                         if key in batch.batch.keys():

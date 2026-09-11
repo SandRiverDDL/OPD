@@ -107,6 +107,26 @@ eopd_enabled: false
 # Number of teacher top-k tokens used by EOPD's forward-KL approximation.
 eopd_top_k: 16
 
+# Probability-gap threshold for AOPD's GKD branch.
+aopd_threshold: 0.1
+
+# Weight of the sampled-token OPD reward in AOPD.
+aopd_opd_weight: 1.0
+
+# Weight of AOPD's teacher top-k GKD loss.
+aopd_gkd_weight: 1.0
+
+# Forward-KL weight in AOPD's asymmetric top-k loss.
+aopd_jsd_beta: 1.0
+
+# Reliability-aware Prune-OPD configuration.
+prune_opd:
+  enable: false
+  metric: overlap_ratio
+  threshold: 0.7
+  w_drop: 0.01
+  w_base: 0.5
+
 # disable logging statistics
 disable_log_stats: True
 

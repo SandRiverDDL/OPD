@@ -20,6 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = REPO_ROOT / "scripts" / "val" / "data"
 PROMPT_TEMPLATE = """{problem} Please reason step by step, and put your final answer within \\boxed{{}}."""
+PROMPT_SUFFIX = r" Please reason step by step, and put your final answer within \boxed{}."
 
 # These globals are populated by configure_evaluation() before worker
 # processes are created. Keeping them global avoids passing the complete
@@ -39,6 +40,7 @@ EVAL_MAX_NUM_BATCHED_TOKENS = 32768
 EVAL_GPU_MEMORY_UTILIZATION = 0.90
 AVAILABLE_GPUS: list[int] = list(range(8))
 REPLACE = False
+VLLM_PORT_BASE: int | None = None
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -124,7 +126,7 @@ def configure_evaluation(args: argparse.Namespace) -> None:
     global EVAL_MAX_NUM_BATCHED_TOKENS
     global EVAL_MAX_NUM_SEQS, EVAL_SEED, EVAL_TASK, EVAL_TASK_N
     global MODEL_DISPLAY_NAMES, MODEL_NAMES, MAX_TOKENS, REPLACE
-    global TASKS, TEMPERATURE, TOP_P
+    global TASKS, TEMPERATURE, TOP_P, VLLM_PORT_BASE
 
     config_path_value = args.config or os.environ.get("EVAL_CONFIG")
     config_path = resolve_config_path(config_path_value) if config_path_value else None
@@ -224,6 +226,14 @@ def configure_evaluation(args: argparse.Namespace) -> None:
     AVAILABLE_GPUS = parse_gpu_ids(
         value("gpus", "EVAL_GPUS", list(range(8)), args.gpus)
     )
+    requested_port_base = os.environ.get("EVAL_VLLM_PORT_BASE")
+    if requested_port_base is not None:
+        VLLM_PORT_BASE = int(requested_port_base)
+    else:
+        # Reserve one disjoint base port per worker.  vLLM's default
+        # find-then-bind selection can race when multiple TP=1 workers
+        # initialize simultaneously.
+        VLLM_PORT_BASE = 20000 + (os.getpid() % 1000) * 32
     REPLACE = parse_bool(
         value("replace", "EVAL_REPLACE", False, args.replace),
         "evaluation.replace",
@@ -315,9 +325,15 @@ def worker_process(args_tuple):
     max_num_seqs = worker_config["max_num_seqs"]
     max_num_batched_tokens = worker_config["max_num_batched_tokens"]
     gpu_memory_utilization = worker_config["gpu_memory_utilization"]
+    vllm_port_base = worker_config["vllm_port_base"]
+    worker_index = worker_config["worker_index"]
     
     # CUDA_VISIBLE_DEVICES must be set inside the spawned process.
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+    # Leave a gap between workers because vLLM may probe subsequent ports
+    # when its requested port is already occupied.  Consecutive assignments
+    # let one worker's fallback collide with the next worker's reserved port.
+    os.environ["VLLM_PORT"] = str(vllm_port_base + worker_index * 16)
     # Import CUDA/vLLM only after constraining visibility to this worker.
     import torch
     from vllm import LLM, SamplingParams
@@ -553,8 +569,12 @@ def main():
 
             # Append suffix prompt to each sample
             for sample in samples:
-                # Ensure the prompt format is correct.
-                sample["prompt"] = PROMPT_TEMPLATE.format(problem=sample["prompt"])
+                # Holdout and benchmark parquet files may already contain the
+                # instruction suffix. Do not append it a second time.
+                prompt = sample["prompt"].rstrip()
+                if not prompt.endswith(PROMPT_SUFFIX):
+                    prompt = PROMPT_TEMPLATE.format(problem=prompt)
+                sample["prompt"] = prompt
 
             if len(samples) > 0:
                 print("Example prompt after formatting:")
@@ -581,6 +601,8 @@ def main():
                         "max_num_seqs": EVAL_MAX_NUM_SEQS,
                         "max_num_batched_tokens": EVAL_MAX_NUM_BATCHED_TOKENS,
                         "gpu_memory_utilization": EVAL_GPU_MEMORY_UTILIZATION,
+                        "vllm_port_base": VLLM_PORT_BASE,
+                        "worker_index": i,
                     },
                 )
                 for i in range(len(sample_shards))

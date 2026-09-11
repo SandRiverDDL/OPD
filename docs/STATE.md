@@ -17,9 +17,11 @@
 - 已建立仓库级工作规范：`AGENTS.md`。
 - 已建立状态记录文件：`docs/STATE.md`。
 - `scripts/opd/run_opd.py` 已支持通过 `distillation.method` 选择
-  `vanilla`、`eopd` 或 `poweropd`；PowerOPD 已接入 sampled-token 的
-  bounded power reward，默认 `alpha=5.0`。EOPD 和 PowerOPD 当前均只完成
-  代码与 CPU/dry-run 验证，尚无本仓库配置下的 GPU benchmark 结果。
+  `vanilla`、`eopd`、`poweropd`、`aopd` 或 `pruneopd`。PowerOPD 已接入
+  sampled-token 的 bounded power reward，默认 `alpha=5.0`；AOPD 已接入
+  sampled-token OPD/GKD 分流；Prune-OPD 已接入 overlap ratio 的 causal
+  reward weighting。AOPD、Prune-OPD、EOPD 和 PowerOPD 当前均只完成代码与
+  CPU/dry-run 验证，尚无本仓库配置下的 GPU benchmark 结果。
 - 已新增一键环境脚本：`scripts/setup_opd_env.sh`。
 - 已新增项目 skill：`.codex/skills/opd-set-up/SKILL.md`。
 - 已新增训练与评估命令手册：`docs/COOKBOOK.md`。

@@ -1,0 +1,13 @@
+extends: opd_sky7b_eopd_20260822.yaml
+
+experiment:
+  name: opd_sky7b_eopd_step1000_no_ckpt
+  description: >
+    1000-step Entropy-Aware On-Policy Distillation with the
+    Skywork-OR1-Math-7B teacher and checkpoint saving disabled.
+
+training:
+  total_training_steps: 1000
+
+system:
+  save_freq: -1

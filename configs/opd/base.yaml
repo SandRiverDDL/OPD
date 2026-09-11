@@ -53,6 +53,16 @@ rollout:
   vllm_max_num_batched_tokens: 65536
   vllm_gpu_memory_utilization: 0.85
   val_n: 16
+  aopd_threshold: 0.1
+  aopd_opd_weight: 1.0
+  aopd_gkd_weight: 1.0
+  aopd_jsd_beta: 1.0
+  prune_opd:
+    enable: false
+    metric: overlap_ratio
+    threshold: 0.7
+    w_drop: 0.01
+    w_base: 0.5
 
 # Independent evaluation defaults for scripts/val/eval/gen_vllm.py.
 # Experiment-specific YAML files may override this section.

@@ -49,7 +49,7 @@ from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.trainer.ppo.core_algos import compute_poweropd_reward
+from verl.trainer.ppo.core_algos import compute_aopd_reward, compute_poweropd_reward
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -61,6 +61,7 @@ from verl.utils.device import (
     get_torch_device,
     set_expandable_segments,
 )
+from verl.utils.distillation import normalize_distillation_method
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -2612,9 +2613,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
-            distillation_method = data.meta_info.get(
-                "distillation_method",
-                self.config.get("distillation_method", "vanilla"),
+            distillation_method = normalize_distillation_method(
+                data.meta_info.get(
+                    "distillation_method",
+                    self.config.get("distillation_method", "vanilla"),
+                )
             )
             eopd_enabled = data.meta_info.get("eopd_enabled", self.config.get("eopd_enabled", False))
             if eopd_enabled and distillation_method == "vanilla":
@@ -2624,6 +2627,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 data.meta_info.get(
                     "poweropd_reward_alpha",
                     self.config.get("poweropd_reward_alpha", 5.0),
+                )
+            )
+            aopd_threshold = float(
+                data.meta_info.get(
+                    "aopd_threshold",
+                    self.config.get("aopd_threshold", 0.1),
+                )
+            )
+            aopd_opd_weight = float(
+                data.meta_info.get(
+                    "aopd_opd_weight",
+                    self.config.get("aopd_opd_weight", 1.0),
                 )
             )
             
@@ -2738,6 +2753,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     alpha=poweropd_alpha,
                 )
                 overlap_mask = None
+            elif distillation_method == "aopd":
+                if top_k <= 0:
+                    raise ValueError(
+                        "AOPD requires rollout.log_prob_top_k > 0 for its GKD branch"
+                    )
+                rm_scores, aopd_gkd_mask = compute_aopd_reward(
+                    teacher_log_prob=teacher_logp,
+                    student_log_prob=student_logp,
+                    threshold=aopd_threshold,
+                    opd_weight=aopd_opd_weight,
+                )
+                overlap_mask = None
             elif top_k > 0 and distillation_method != "eopd":
                 # Reward calculation is moved to ray_trainer for top_k > 0
                 # because it needs student_on_teacher_log_probs which requires another actor forward
@@ -2762,6 +2789,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             tensors = {}
             if rm_scores is not None:
                 tensors["rm_scores"] = rm_scores
+            if distillation_method == "aopd":
+                tensors["aopd_gkd_mask"] = aopd_gkd_mask
             
             if teacher_on_student_logp is not None and distillation_method != "eopd":
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp

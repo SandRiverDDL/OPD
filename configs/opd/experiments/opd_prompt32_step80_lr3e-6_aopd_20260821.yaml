@@ -1,0 +1,23 @@
+extends: ../base.yaml
+
+experiment:
+  name: opd_prompt32_step80_lr3e-6_aopd_20260821
+  description: >
+    Asymmetric On-Policy Distillation with sampled-token OPD on tokens where
+    the student does not confidently exceed the teacher, and teacher top-k
+    GKD on the complementary token set.
+
+distillation:
+  method: aopd
+  params:
+    top_k: 16
+    threshold: 0.1
+    opd_weight: 1.0
+    gkd_weight: 1.0
+    jsd_beta: 1.0
+
+training:
+  prompt_batch_size: 32
+  ppo_mini_batch_size: 32
+  total_training_steps: 80
+  learning_rate: 3.0e-6

@@ -44,6 +44,9 @@ class PolicyLossConfig(BaseConfig):
         eopd_entropy_threshold (float): Teacher entropy threshold above
             which EOPD activates its forward-KL term.
         eopd_forward_kl_coef (float): Coefficient for EOPD's forward-KL term.
+        aopd_threshold (float): Probability-gap threshold for AOPD's GKD branch.
+        aopd_gkd_weight (float): Weight of AOPD's top-k GKD loss.
+        aopd_jsd_beta (float): Forward-KL weight in AOPD's asymmetric top-k loss.
     """
 
     loss_mode: str = "vanilla"
@@ -54,6 +57,9 @@ class PolicyLossConfig(BaseConfig):
     ppo_kl_coef: float = 0.1
     eopd_entropy_threshold: float = 0.8
     eopd_forward_kl_coef: float = 1.0
+    aopd_threshold: float = 0.1
+    aopd_gkd_weight: float = 1.0
+    aopd_jsd_beta: float = 1.0
 
 
 @dataclass

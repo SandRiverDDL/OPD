@@ -1007,6 +1007,96 @@ def compute_poweropd_reward(
     return (teacher_prob_power - student_prob_power).detach()
 
 
+def compute_aopd_reward(
+    teacher_log_prob: torch.Tensor,
+    student_log_prob: torch.Tensor,
+    threshold: float,
+    opd_weight: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the sampled-token OPD branch of AOPD.
+
+    AOPD routes tokens for which the student already assigns substantially
+    more probability than the teacher to the GKD branch.  Those tokens do not
+    receive an OPD reward; the actor policy loss handles them with the
+    teacher top-k distribution instead.
+
+    Returns:
+        ``(reward, gkd_mask)`` where ``gkd_mask`` is ``True`` at positions
+        routed to the GKD branch.
+    """
+    if threshold < 0:
+        raise ValueError(f"AOPD threshold must be non-negative, got {threshold}")
+    if opd_weight < 0:
+        raise ValueError(f"AOPD OPD weight must be non-negative, got {opd_weight}")
+    if teacher_log_prob.shape != student_log_prob.shape:
+        raise ValueError(
+            "AOPD teacher and student log probabilities must have the same "
+            f"shape, got {teacher_log_prob.shape} and {student_log_prob.shape}"
+        )
+
+    teacher_prob = torch.exp(teacher_log_prob.float())
+    student_prob = torch.exp(student_log_prob.float())
+    gkd_mask = (student_prob - teacher_prob) > threshold
+    reward = opd_weight * (teacher_log_prob.float() - student_log_prob.float())
+    reward = torch.where(gkd_mask, torch.zeros_like(reward), reward)
+    return reward.detach(), gkd_mask.detach()
+
+
+def compute_topk_distillation_loss(
+    teacher_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
+    *,
+    beta: float = 1.0,
+    renormalize_teacher: bool = False,
+) -> torch.Tensor:
+    """Compute a token-level asymmetric KL loss on teacher top-k tokens.
+
+    ``teacher_log_probs`` are detached because they are produced by the
+    frozen teacher.  The student log probabilities stay connected to the
+    actor graph, so the returned loss can be used directly in backprop.
+
+    Args:
+        teacher_log_probs: Full-vocabulary teacher log probabilities gathered
+            at teacher top-k ids, shape ``(..., k)``.
+        student_log_probs: Student log probabilities at the same ids.
+        beta: Weight of ``KL(teacher || student)``.  ``beta=1`` is forward
+            KL, while ``beta=0`` is reverse KL.
+        renormalize_teacher: Renormalize teacher probabilities over the
+            supplied top-k set.  EOPD uses this approximation; AOPD keeps the
+            original full-vocabulary teacher probabilities.
+    """
+
+    if teacher_log_probs.shape != student_log_probs.shape:
+        raise ValueError(
+            "Teacher and student top-k log probabilities must have the same "
+            f"shape, got {teacher_log_probs.shape} and {student_log_probs.shape}"
+        )
+    if not 0.0 <= beta <= 1.0:
+        raise ValueError(f"Top-k distillation beta must be in [0, 1], got {beta}")
+
+    teacher_log_probs = teacher_log_probs.detach().float()
+    student_log_probs = student_log_probs.float()
+    if renormalize_teacher:
+        teacher_log_probs = teacher_log_probs - torch.logsumexp(
+            teacher_log_probs, dim=-1, keepdim=True
+        )
+
+    teacher_probs = torch.exp(teacher_log_probs)
+    forward_kl = torch.sum(
+        teacher_probs * (teacher_log_probs - student_log_probs),
+        dim=-1,
+    )
+    if beta == 1.0:
+        return forward_kl
+
+    student_probs = torch.exp(student_log_probs)
+    reverse_kl = torch.sum(
+        student_probs * (student_log_probs - teacher_log_probs),
+        dim=-1,
+    )
+    return beta * forward_kl + (1.0 - beta) * reverse_kl
+
+
 @deprecated("verl.trainer.ppo.core_algos.compute_policy_loss_vanilla")
 def compute_policy_loss(
     old_log_prob,
@@ -1313,15 +1403,11 @@ def compute_policy_loss_eopd(
 
     # The teacher reward worker returns full-vocabulary log probabilities for
     # its top-k ids.  Renormalizing here produces the paper's \tilde{p}_teacher.
-    teacher_topk_log_probs = teacher_topk_log_probs.detach()
-    student_topk_log_probs = student_topk_log_probs.float()
-    teacher_topk_log_probs = teacher_topk_log_probs - torch.logsumexp(
-        teacher_topk_log_probs, dim=-1, keepdim=True
-    )
-    teacher_topk_probs = torch.exp(teacher_topk_log_probs)
-    forward_kl_per_token = torch.sum(
-        teacher_topk_probs * (teacher_topk_log_probs - student_topk_log_probs),
-        dim=-1,
+    forward_kl_per_token = compute_topk_distillation_loss(
+        teacher_topk_log_probs,
+        student_topk_log_probs,
+        beta=1.0,
+        renormalize_teacher=True,
     )
 
     high_entropy_mask = (
@@ -1353,6 +1439,120 @@ def compute_policy_loss_eopd(
         }
     )
     return base_loss + forward_kl_loss, pg_metrics
+
+
+@register_policy_loss("aopd")
+def compute_policy_loss_aopd(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+    format_mask: torch.Tensor | None = None,
+    teacher_log_prob: torch.Tensor | None = None,
+    teacher_topk_log_probs: torch.Tensor | None = None,
+    student_topk_log_probs: torch.Tensor | None = None,
+    aopd_gkd_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the asymmetric OPD/GKD policy loss.
+
+    The sampled-token OPD reward is used only when
+    ``p_student(x_t) - p_teacher(x_t) <= threshold``.  On the complementary
+    token set, AOPD uses a teacher-top-k GKD loss.  ``jsd_beta`` interpolates
+    the teacher-to-student and student-to-teacher top-k KL terms; setting it
+    to ``1`` gives the forward-KL form used by the reference implementation.
+    """
+    if config is None:
+        raise ValueError("config is required for AOPD policy loss")
+    if teacher_topk_log_probs is None or student_topk_log_probs is None:
+        raise ValueError(
+            "AOPD requires teacher_topk_log_probs and student_topk_log_probs"
+        )
+    if teacher_log_prob is not None and teacher_log_prob.shape != response_mask.shape:
+        raise ValueError(
+            "AOPD teacher_log_prob must align with response_mask, "
+            f"got {teacher_log_prob.shape} and {response_mask.shape}"
+        )
+    if aopd_gkd_mask is not None and aopd_gkd_mask.shape != response_mask.shape:
+        raise ValueError(
+            "AOPD aopd_gkd_mask must align with response_mask, "
+            f"got {aopd_gkd_mask.shape} and {response_mask.shape}"
+        )
+    if teacher_topk_log_probs.shape != student_topk_log_probs.shape:
+        raise ValueError(
+            "AOPD teacher_topk_log_probs and student_topk_log_probs must "
+            f"have the same shape, got {teacher_topk_log_probs.shape} and "
+            f"{student_topk_log_probs.shape}"
+        )
+    if teacher_topk_log_probs.shape[:-1] != response_mask.shape:
+        raise ValueError(
+            "AOPD top-k log probabilities must align with response_mask, "
+            f"got {teacher_topk_log_probs.shape[:-1]} and {response_mask.shape}"
+        )
+
+    base_loss, pg_metrics = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+        format_mask=format_mask,
+    )
+
+    policy_loss_config = config.policy_loss
+    threshold = float(policy_loss_config.get("aopd_threshold", 0.1))
+    gkd_weight = float(policy_loss_config.get("aopd_gkd_weight", 1.0))
+    jsd_beta = float(policy_loss_config.get("aopd_jsd_beta", 1.0))
+    if threshold < 0:
+        raise ValueError(f"AOPD threshold must be non-negative, got {threshold}")
+    if gkd_weight < 0:
+        raise ValueError(f"AOPD GKD weight must be non-negative, got {gkd_weight}")
+    if not 0.0 <= jsd_beta <= 1.0:
+        raise ValueError(f"AOPD jsd_beta must be in [0, 1], got {jsd_beta}")
+
+    if aopd_gkd_mask is None:
+        if teacher_log_prob is None:
+            raise ValueError("AOPD requires teacher_log_prob when aopd_gkd_mask is absent")
+        teacher_log_prob = teacher_log_prob.detach().float()
+        gkd_mask = (
+            response_mask
+            * (
+                torch.exp(old_log_prob.float()) - torch.exp(teacher_log_prob)
+                > threshold
+            ).to(dtype=response_mask.dtype)
+        )
+    else:
+        gkd_mask = response_mask * aopd_gkd_mask.to(dtype=response_mask.dtype)
+
+    gkd_per_token = compute_topk_distillation_loss(
+        teacher_topk_log_probs,
+        student_topk_log_probs,
+        beta=jsd_beta,
+        renormalize_teacher=False,
+    )
+
+    valid_tokens = response_mask.sum().clamp_min(1.0)
+    gkd_loss = gkd_weight * (gkd_per_token * gkd_mask).sum() / valid_tokens
+    gkd_tokens = gkd_mask.sum()
+    gkd_ratio = gkd_tokens / valid_tokens
+    if gkd_tokens.item() > 0:
+        active_gkd = (gkd_per_token * gkd_mask).sum() / gkd_tokens
+    else:
+        active_gkd = gkd_per_token.sum() * 0.0
+
+    pg_metrics.update(
+        {
+            "actor/aopd_gkd_loss": gkd_loss.detach().item(),
+            "actor/aopd_gkd": active_gkd.detach().item(),
+            "actor/aopd_gkd_token_ratio": gkd_ratio.detach().item(),
+            "actor/aopd_gkd_tokens": gkd_tokens.detach().item(),
+        }
+    )
+    return base_loss + gkd_loss, pg_metrics
 
 
 @register_policy_loss("gspo")

@@ -30,9 +30,11 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
+from verl.utils.distillation import TOPK_POLICY_LOSS_METHODS, get_distillation_method_spec
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
+from verl.utils.prune_opd import apply_prune_opd_to_scores
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
@@ -518,6 +520,9 @@ class DataParallelPPOActor(BasePPOActor):
         if T_logp is not None: T_logp = T_logp.to(device)
         overlap_mask = data.batch.get("overlap_mask", None)
         if overlap_mask is not None: overlap_mask = overlap_mask.to(device)
+        teacher_in_student_mask = data.batch.get("teacher_in_student_mask", None)
+        if teacher_in_student_mask is not None:
+            teacher_in_student_mask = teacher_in_student_mask.to(device)
 
         def compute_reward_weights(S_logp, T_logp, valid_mask, weight_mode, normalize=True):
             """Compute weights for reward calculation.
@@ -619,7 +624,29 @@ class DataParallelPPOActor(BasePPOActor):
             res_tensors["union_top_k_ids"] = union_ids
             res_tensors["union_top_k_log_probs"] = S_logp_union
             res_tensors["student_log_probs_on_teacher_ids"] = S_on_T
-            
+
+        prune_opd_cfg = data.meta_info.get("prune_opd", None)
+        if prune_opd_cfg and prune_opd_cfg.get("enable", False):
+            if overlap_mask is None:
+                raise ValueError("Prune-OPD requires overlap_mask from the teacher worker")
+            if strategy == "only_tch":
+                prune_overlap_mask = teacher_in_student_mask
+            elif rm_scores.shape[-1] == overlap_mask.shape[-1]:
+                prune_overlap_mask = overlap_mask
+            elif teacher_in_student_mask is not None:
+                prune_overlap_mask = torch.cat([overlap_mask, teacher_in_student_mask], dim=-1)
+            else:
+                raise ValueError(
+                    "Prune-OPD cannot align overlap masks with the selected top-k reward shape"
+                )
+            rm_scores, prune_aux_tensors = apply_prune_opd_to_scores(
+                rm_scores=rm_scores,
+                overlap_mask=prune_overlap_mask,
+                response_mask=data.batch["response_mask"],
+                config=prune_opd_cfg,
+            )
+            res_tensors.update(prune_aux_tensors)
+
         res_tensors["rm_scores"] = rm_scores
         return DataProto.from_dict(tensors=res_tensors)
 
@@ -745,14 +772,10 @@ class DataParallelPPOActor(BasePPOActor):
             "advantages",
         ]
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if loss_mode == "eopd":
-            select_keys.extend(
-                [
-                    "teacher_entropy",
-                    "teacher_top_k_ids",
-                    "teacher_top_k_log_probs",
-                ]
-            )
+        method_spec = get_distillation_method_spec(loss_mode) if loss_mode in TOPK_POLICY_LOSS_METHODS else None
+        if method_spec is not None:
+            select_keys.extend(["teacher_top_k_ids", "teacher_top_k_log_probs"])
+            select_keys.extend(method_spec.policy_loss_extra_keys)
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -832,15 +855,14 @@ class DataParallelPPOActor(BasePPOActor):
                     if entropy_coeff != 0:
                         calculate_entropy = True
                     
-                    # EOPD uses sampled-token advantages plus an auxiliary
-                    # forward-KL term over the teacher's top-k token ids.
-                    eopd_teacher_topk_log_probs = None
-                    eopd_student_topk_log_probs = None
-                    if loss_mode == "eopd":
+                    # EOPD/AOPD use the same teacher-top-k actor forward.  The
+                    # registered policy loss decides how to consume it.
+                    topk_loss_kwargs = {}
+                    if method_spec is not None:
                         teacher_top_k_ids = model_inputs["teacher_top_k_ids"]
-                        eopd_teacher_topk_log_probs = model_inputs["teacher_top_k_log_probs"]
+                        teacher_topk_log_probs = model_inputs["teacher_top_k_log_probs"]
                         teacher_top_k = teacher_top_k_ids.shape[-1]
-                        entropy, log_prob, _, eopd_student_topk_log_probs = self._forward_micro_batch(
+                        entropy, log_prob, _, student_topk_log_probs = self._forward_micro_batch(
                             model_inputs,
                             temperature=temperature,
                             calculate_entropy=calculate_entropy,
@@ -848,6 +870,15 @@ class DataParallelPPOActor(BasePPOActor):
                             student_top_k_ids=teacher_top_k_ids,
                         )
                         log_prob_for_loss = log_prob
+                        topk_loss_kwargs.update(
+                            {
+                                "teacher_topk_log_probs": teacher_topk_log_probs,
+                                "student_topk_log_probs": student_topk_log_probs,
+                            }
+                        )
+                        topk_loss_kwargs.update(
+                            {key: model_inputs[key] for key in method_spec.policy_loss_extra_keys}
+                        )
 
                     # Check if we have 3D advantages (top-k sampling case)
                     # If so, we need to recompute top-k log probs for correct gradient
@@ -926,14 +957,7 @@ class DataParallelPPOActor(BasePPOActor):
                         rollout_is_weights=rollout_is_weights,
                         format_mask=format_mask,
                     )
-                    if loss_mode == "eopd":
-                        policy_loss_kwargs.update(
-                            {
-                                "teacher_entropy": model_inputs["teacher_entropy"],
-                                "teacher_topk_log_probs": eopd_teacher_topk_log_probs,
-                                "student_topk_log_probs": eopd_student_topk_log_probs,
-                            }
-                        )
+                    policy_loss_kwargs.update(topk_loss_kwargs)
                     pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
                     micro_batch_metrics.update(pg_metrics)
 

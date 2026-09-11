@@ -147,6 +147,11 @@ class RolloutConfig(BaseConfig):
     poweropd_reward_alpha: float = 5.0
     eopd_enabled: bool = False
     eopd_top_k: int = 16
+    aopd_threshold: float = 0.1
+    aopd_opd_weight: float = 1.0
+    aopd_gkd_weight: float = 1.0
+    aopd_jsd_beta: float = 1.0
+    prune_opd: dict = field(default_factory=dict)
 
     disable_log_stats: bool = True
 

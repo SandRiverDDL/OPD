@@ -71,6 +71,15 @@ policy_loss:
   # Coefficient for the EOPD forward-KL term
   eopd_forward_kl_coef: 1.0
 
+  # Probability-gap threshold for AOPD's GKD branch
+  aopd_threshold: 0.1
+
+  # Weight of AOPD's teacher top-k GKD loss
+  aopd_gkd_weight: 1.0
+
+  # Forward-KL weight in AOPD's asymmetric top-k loss
+  aopd_jsd_beta: 1.0
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 

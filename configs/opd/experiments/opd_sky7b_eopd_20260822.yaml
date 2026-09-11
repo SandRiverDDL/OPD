@@ -1,0 +1,20 @@
+extends: opd_sky7b_sampled_token.yaml
+
+experiment:
+  name: opd_sky7b_eopd_20260822
+  description: >
+    300-step Entropy-Aware On-Policy Distillation with the
+    Skywork-OR1-Math-7B teacher.
+
+distillation:
+  method: eopd
+  params:
+    top_k: 16
+    entropy_threshold: 0.8
+    forward_kl_coef: 1.0
+
+training:
+  total_training_steps: 300
+
+system:
+  save_freq: 20
